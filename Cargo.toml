@@ -1,0 +1,38 @@
+[package]
+name = "hid_rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+log = "0.4"
+uuid = { version = "1.0", features = ["v4", "serde", "js"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+futures = "0.3"
+thiserror = "1.0"
+anyhow = "1.0"
+once_cell = "1.19"
+
+[target.'cfg(not(any(target_os = "android", target_arch = "wasm32")))'.dependencies]
+hidapi = "2.6"
+hidreport = "0.4.0"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+hidreport = "0.4.0"
+# android_logger = "0.13" # Optional, for internal logging if needed
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["Hid", "HidDevice", "Navigator", "Window", "HidDeviceRequestOptions", "HidConnectionEvent", "HidInputReportEvent"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde-wasm-bindgen = "0.6"
+
+[[example]]
+name = "simple_test"
+path = "examples/simple_test.rs"
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["full"] }
+env_logger = "0.10"
