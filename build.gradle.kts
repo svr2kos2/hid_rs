@@ -10,9 +10,5 @@ buildscript {
     }
 }
 
-allprojects {
-    repositories {
-        google()
-        mavenCentral()
-    }
-}
+// allprojects block removed to fix FAIL_ON_PROJECT_REPOS error
+
