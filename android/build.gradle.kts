@@ -1,7 +1,11 @@
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
+    id("maven-publish")
 }
+
+group = "com.github.svr2kos2"
+version = "0.1.0"
 
 android {
     namespace = "com.sayodevice.hid_rs"
@@ -36,6 +40,19 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("org.jetbrains.kotlin:kotlin-stdlib:1.9.22")
+}
+
+afterEvaluate {
+    publishing {
+        publications {
+            create<MavenPublication>("release") {
+                from(components["release"])
+                groupId = "com.github.svr2kos2"
+                artifactId = "hid_rs"
+                version = "0.1.0"
+            }
+        }
+    }
 }
 
 tasks.register<Exec>("cargoBuild") {

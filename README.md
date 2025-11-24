@@ -38,41 +38,34 @@ async fn example() {
 
 This library is designed to be used as an Android Library Module. It includes the necessary Kotlin bridge code and JNI bindings.
 
-#### 1. Clone the Repository
+#### 1. Add Dependency via JitPack
 
-Since this library contains Android-specific code that must be compiled by Gradle, you **cannot** rely solely on `cargo` to manage the dependency for Android (Cargo downloads are not easily accessible to Gradle).
+You can use JitPack to include the Android library directly from GitHub without cloning the repository manually.
 
-You must clone this repository locally (or add it as a git submodule) to your project.
+Add JitPack to your root `build.gradle.kts` (or `settings.gradle.kts`):
 
-```bash
-git clone https://github.com/svr2kos2/hid_rs.git
-# OR as a submodule
-git submodule add https://github.com/svr2kos2/hid_rs.git
+```kotlin
+// settings.gradle.kts
+dependencyResolutionManagement {
+    repositories {
+        // ...
+        maven { url = uri("https://jitpack.io") }
+    }
+}
 ```
 
-#### 2. Add to `settings.gradle`
-
-Include the local `hid_rs` project in your Android project's `settings.gradle`.
-
-```gradle
-// settings.gradle
-include ':hid_rs'
-// Point to the 'android' directory inside the cloned hid_rs repo
-project(':hid_rs').projectDir = new File('path/to/cloned/hid_rs/android')
-```
-
-#### 3. Add Dependency
-
-Add the dependency to your app's `build.gradle.kts`:
+Then add the dependency to your app's `build.gradle.kts`:
 
 ```kotlin
 // app/build.gradle.kts
 dependencies {
-    implementation(project(":hid_rs"))
+    implementation("com.github.svr2kos2:hid_rs:hid_rs:master-SNAPSHOT")
 }
 ```
 
-#### 3. Initialize in Application/Activity
+*Note: Replace `master-SNAPSHOT` with a specific commit hash or tag for stability.*
+
+#### 2. Initialize in Application/Activity
 
 You must initialize the library with the Android Context before using any HID functions. This loads the native library and sets up the JNI context.
 
