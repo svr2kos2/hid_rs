@@ -86,9 +86,19 @@ Ensure your app requests permissions if needed, though the library handles the U
 ### Web (WASM)
 
 When compiling for `wasm32-unknown-unknown`, the library uses the browser's WebHID API.
+**Note**: WebHID is considered an unstable API in `web-sys`, so you must enable the `web_sys_unstable_apis` config flag.
+
+You can do this by setting the `RUSTFLAGS` environment variable:
 
 ```bash
-cargo build --target wasm32-unknown-unknown
+RUSTFLAGS=--cfg=web_sys_unstable_apis cargo build --target wasm32-unknown-unknown
+```
+
+Or by adding it to your project's `.cargo/config.toml`:
+
+```toml
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=web_sys_unstable_apis"]
 ```
 
 Ensure your site is served over HTTPS (required for WebHID).
