@@ -38,17 +38,30 @@ async fn example() {
 
 This library is designed to be used as an Android Library Module. It includes the necessary Kotlin bridge code and JNI bindings.
 
-#### 1. Add to `settings.gradle`
+#### 1. Clone the Repository
 
-Include the `hid_rs` project in your Android project's `settings.gradle`. You can use a Git submodule or clone it locally.
+Since this library contains Android-specific code that must be compiled by Gradle, you **cannot** rely solely on `cargo` to manage the dependency for Android (Cargo downloads are not easily accessible to Gradle).
+
+You must clone this repository locally (or add it as a git submodule) to your project.
+
+```bash
+git clone https://github.com/svr2kos2/hid_rs.git
+# OR as a submodule
+git submodule add https://github.com/svr2kos2/hid_rs.git
+```
+
+#### 2. Add to `settings.gradle`
+
+Include the local `hid_rs` project in your Android project's `settings.gradle`.
 
 ```gradle
 // settings.gradle
 include ':hid_rs'
-project(':hid_rs').projectDir = new File('path/to/hid_rs/android')
+// Point to the 'android' directory inside the cloned hid_rs repo
+project(':hid_rs').projectDir = new File('path/to/cloned/hid_rs/android')
 ```
 
-#### 2. Add Dependency
+#### 3. Add Dependency
 
 Add the dependency to your app's `build.gradle.kts`:
 
