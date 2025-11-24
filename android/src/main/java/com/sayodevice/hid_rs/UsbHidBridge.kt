@@ -1,4 +1,4 @@
-package com.sayodevice.hid
+package com.sayodevice.hid_rs
 
 import android.content.Context
 import android.app.PendingIntent
@@ -25,7 +25,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 object UsbHidBridge {
     private const val TAG = "UsbHidBridge"
-    private const val ACTION_USB_PERMISSION = "com.sayodevice.hid.USB_PERMISSION"
+    private const val ACTION_USB_PERMISSION = "com.sayodevice.hid_rs.USB_PERMISSION"
     private val deviceUuidMap = ConcurrentHashMap<String, UsbDevice>()
     private val uuidByDeviceKey = ConcurrentHashMap<String, String>()
     private val deviceKeyByUuid = ConcurrentHashMap<String, String>()

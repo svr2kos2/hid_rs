@@ -18,7 +18,13 @@ Cargo.lock
 .vscode/
 *.swp
 *.swo
-*~
+
+# Android
+.gradle/
+build/
+local.properties
+*.iml
+android/src/main/jniLibs/
 
 # OS
 .DS_Store

@@ -1,4 +1,4 @@
-package com.sayodevice.hid
+package com.sayodevice.hid_rs
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -12,7 +12,7 @@ import android.hardware.usb.UsbManager
  */
 class UsbPermissionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == "com.sayodevice.hid.USB_PERMISSION") {
+        if (intent.action == "com.sayodevice.hid_rs.USB_PERMISSION") {
             val device: UsbDevice? = if (android.os.Build.VERSION.SDK_INT >= 33) {
                 intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
             } else {

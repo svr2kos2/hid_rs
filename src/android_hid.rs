@@ -641,7 +641,7 @@ fn get_vm_and_context() -> Result<(&'static JavaVM, GlobalRef), String> {
 
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub extern "system" fn Java_com_sayodevice_hid_HidInit_initAndroidContext(
+pub extern "system" fn Java_com_sayodevice_hid_1rs_HidInit_initAndroidContext(
     env: JNIEnv,
     _class: JObject,
     context: JObject,
@@ -685,7 +685,7 @@ fn load_bridge_class(env: &mut JNIEnv<'_>, context: &GlobalRef) -> Result<Global
         .map_err(|e| format!("getClassLoader to obj failed: {e:?}"))?;
 
     let name = env
-        .new_string("com.sayodevice.hid.UsbHidBridge")
+        .new_string("com.sayodevice.hid_rs.UsbHidBridge")
         .map_err(|e| format!("new_string failed: {e:?}"))?;
     let name_obj: JObject = name.into();
     let clazz_obj = env

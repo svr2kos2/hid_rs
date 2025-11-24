@@ -1,4 +1,4 @@
-package com.sayodevice.hid
+package com.sayodevice.hid_rs
 
 import android.util.Log
 
