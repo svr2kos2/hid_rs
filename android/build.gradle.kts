@@ -82,21 +82,22 @@ tasks.register<Exec>("cargoBuild") {
     // Let's just define a task that calls cargo-ndk if available, or just cargo.
 }
 
+// ...existing code...
 // Better approach: use a task that executes a shell script or multiple cargo commands.
-tasks.register("buildRust") {
-    doLast {
-        exec {
-            workingDir = file("..")
-            commandLine("cargo", "ndk", 
-                "-t", "aarch64-linux-android", 
-                "-t", "armv7-linux-androideabi", 
-                "-t", "x86_64-linux-android", 
-                "-o", "android/src/main/jniLibs", 
-                "build", "--release", "--lib")
-        }
-    }
-}
+// tasks.register("buildRust") {
+//     doLast {
+//         exec {
+//             workingDir = file("..")
+//             commandLine("cargo", "ndk", 
+//                 "-t", "aarch64-linux-android", 
+//                 "-t", "armv7-linux-androideabi", 
+//                 "-t", "x86_64-linux-android", 
+//                 "-o", "android/src/main/jniLibs", 
+//                 "build", "--release", "--lib")
+//         }
+//     }
+// }
 
-tasks.named("preBuild") {
-    dependsOn("buildRust")
-}
+// tasks.named("preBuild") {
+//     dependsOn("buildRust")
+// }
