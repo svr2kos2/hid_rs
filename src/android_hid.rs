@@ -15,21 +15,20 @@ static ANDROID_APP_CTX: OnceCell<GlobalRef> = OnceCell::new();
 static ANDROID_JVM: OnceCell<JavaVM> = OnceCell::new();
 
 // ===== Android-specific connection change tracking =====
-// static DEVICE_SET: Lazy<RwLock<HashSet<u128>>> = Lazy::new(|| RwLock::new(HashSet::new())) ;
-// static DEVICE_CONNECTION_LISTENERS: Lazy<RwLock<Vec<SafeCallback2<u128, bool>>>> = Lazy::new(|| RwLock::new(Vec::new()));
-// static POLLER_RUNNING: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
-// static POLLER_ABORT: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+static DEVICE_SET: Lazy<RwLock<HashSet<u128>>> = Lazy::new(|| RwLock::new(HashSet::new())) ;
+static DEVICE_CONNECTION_LISTENERS: Lazy<RwLock<Vec<SafeCallback2<u128, bool>>>> = Lazy::new(|| RwLock::new(Vec::new()));
+static POLLER_RUNNING: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+static POLLER_ABORT: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 
 // Per-device report listeners and background readers
-// static DEVICE_REPORT_LISTENERS: Lazy<RwLock<HashMap<u128, Vec<SafeCallback2<u128, Vec<u8>>>>>> = Lazy::new(|| RwLock::new(HashMap::new()));
-// static REPORT_READERS: Lazy<RwLock<HashSet<u128>>> = Lazy::new(|| RwLock::new(HashSet::new()));
-// static REPORT_ABORT_FLAGS: Lazy<RwLock<HashMap<u128, Arc<AtomicBool>>>> = Lazy::new(|| RwLock::new(HashMap::new()));
+static DEVICE_REPORT_LISTENERS: Lazy<RwLock<HashMap<u128, Vec<SafeCallback2<u128, Vec<u8>>>>>> = Lazy::new(|| RwLock::new(HashMap::new()));
+static REPORT_READERS: Lazy<RwLock<HashSet<u128>>> = Lazy::new(|| RwLock::new(HashSet::new()));
+static REPORT_ABORT_FLAGS: Lazy<RwLock<HashMap<u128, Arc<AtomicBool>>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 
 pub(in crate) fn is_supported() -> bool {
     #[cfg(target_os = "android")]
     {
         log::debug!("android_hid is_supported check");
-        /*
         match get_vm_and_context() {
             Ok((vm, ctx)) => {
                 log::debug!("JNI env/context obtained");
@@ -47,7 +46,6 @@ pub(in crate) fn is_supported() -> bool {
             }
             Err(e) => log::debug!("JNI env/context unavailable: {:?}", e),
         }
-        */
     }
     true
 }
@@ -119,7 +117,6 @@ pub(in crate) fn get_device_list() -> Result<Vec<u128>, HidError> {
 }
 
 pub(in crate) async fn sub_connection_changed(_callback: SafeCallback2<u128, bool>) -> Result<(), HidError> {
-    /*
     let callback = _callback;
 
     let current_ids = get_device_list().unwrap_or_default();
@@ -184,12 +181,11 @@ pub(in crate) async fn sub_connection_changed(_callback: SafeCallback2<u128, boo
             POLLER_RUNNING.store(false, Ordering::SeqCst);
         });
     }
-    */
+
     Ok(())
 }
 
 pub(in crate) async fn unsub_connection_changed(_callback: SafeCallback2<u128, bool>) -> Result<(), HidError> {
-    /*
     let callback = _callback;
 
     let snapshot: Vec<u128> = {
@@ -206,7 +202,7 @@ pub(in crate) async fn unsub_connection_changed(_callback: SafeCallback2<u128, b
             POLLER_ABORT.store(true, Ordering::SeqCst);
         }
     }
-    */
+
     Ok(())
 }
 
@@ -449,7 +445,6 @@ pub(in crate) async fn send_firmware(
 
 pub(in crate) async fn sub_report_arrive(uuid: u128, callback: SafeCallback2<u128, Vec<u8>>) -> Result<(), HidError> {
     log::debug!("sub_report_arrive called for {:?}", uuid::Uuid::from_u128(uuid));
-    /*
     {
         let mut map = DEVICE_REPORT_LISTENERS
             .write()
@@ -606,12 +601,11 @@ pub(in crate) async fn sub_report_arrive(uuid: u128, callback: SafeCallback2<u12
             log::debug!("Report reader for {:?} could not clear readers set", uuid::Uuid::from_u128(uuid));
         }
     });
-    */
+
     Ok(())
 }
 
 pub(in crate) async fn unsub_report_arrive(uuid: u128, callback: SafeCallback2<u128, Vec<u8>>) -> Result<(), HidError> {
-    /*
     let mut should_stop = false;
     {
         let mut map = DEVICE_REPORT_LISTENERS
@@ -632,7 +626,7 @@ pub(in crate) async fn unsub_report_arrive(uuid: u128, callback: SafeCallback2<u
             readers.remove(&uuid);
         }
     }
-    */
+
     Ok(())
 }
 
@@ -653,9 +647,9 @@ pub extern "system" fn Java_com_sayodevice_hid_1rs_HidInit_initAndroidContext(
     context: JObject,
 ) {
     #[cfg(target_os = "android")]
-    {
-        // android_logger removed to prevent mutex crash
-    }
+    android_logger::init_once(
+        android_logger::Config::default().with_max_level(log::LevelFilter::Trace),
+    );
 
     log::error!("Java_com_sayodevice_hid_1rs_HidInit_initAndroidContext called");
     if let Ok(vm) = env.get_java_vm() {
