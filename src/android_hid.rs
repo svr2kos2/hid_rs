@@ -647,9 +647,9 @@ pub extern "system" fn Java_com_sayodevice_hid_1rs_HidInit_initAndroidContext(
     context: JObject,
 ) {
     #[cfg(target_os = "android")]
-    // android_logger::init_once(
-    //     android_logger::Config::default().with_max_level(log::LevelFilter::Trace),
-    // );
+    {
+        // android_logger removed to prevent mutex crash
+    }
 
     log::error!("Java_com_sayodevice_hid_1rs_HidInit_initAndroidContext called");
     if let Ok(vm) = env.get_java_vm() {
