@@ -1,0 +1,1 @@
+-keep class com.sayodevice.hid_rs.** { *; }

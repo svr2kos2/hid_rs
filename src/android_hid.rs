@@ -13,6 +13,8 @@ use once_cell::sync::{OnceCell, Lazy};
 static ANDROID_APP_CTX: OnceCell<GlobalRef> = OnceCell::new();
 #[cfg(target_os = "android")]
 static ANDROID_JVM: OnceCell<JavaVM> = OnceCell::new();
+#[cfg(target_os = "android")]
+static BRIDGE_CLASS: OnceCell<GlobalRef> = OnceCell::new();
 
 // ===== Android-specific connection change tracking =====
 static DEVICE_SET: Lazy<RwLock<HashSet<u128>>> = Lazy::new(|| RwLock::new(HashSet::new())) ;
@@ -167,6 +169,13 @@ pub(in crate) async fn sub_connection_changed(_callback: SafeCallback2<u128, boo
             guard.extend(current_ids.into_iter());
         }
         std::thread::spawn(move || {
+            #[cfg(target_os = "android")]
+            let _attach_guard = if let Ok((vm, _)) = get_vm_and_context() {
+                vm.attach_current_thread().ok()
+            } else {
+                None
+            };
+
             loop {
                 if POLLER_ABORT.load(Ordering::Relaxed) { break; }
                 let new_list = get_device_list().unwrap_or_default();
@@ -726,6 +735,10 @@ fn call_bridge_is_supported(env: &mut JNIEnv<'_>, context: &GlobalRef) -> Result
 
 #[cfg(target_os = "android")]
 fn load_bridge_class(env: &mut JNIEnv<'_>, context: &GlobalRef) -> Result<GlobalRef, String> {
+    if let Some(clazz) = BRIDGE_CLASS.get() {
+        return Ok(clazz.clone());
+    }
+
     let _fn_logger = FnLogger::new("android_hid::load_bridge_class");
     let loader_obj = env
         .call_method(
@@ -752,6 +765,10 @@ fn load_bridge_class(env: &mut JNIEnv<'_>, context: &GlobalRef) -> Result<Global
         .map_err(|e| format!("ClassLoader.loadClass failed: {e:?}"))?
         .l()
         .map_err(|e| format!("loadClass to obj failed: {e:?}"))?;
-    env.new_global_ref(clazz_obj)
-        .map_err(|e| format!("new_global_ref for class failed: {e:?}"))
+    
+    let global_clazz = env.new_global_ref(clazz_obj)
+        .map_err(|e| format!("new_global_ref for class failed: {e:?}"))?;
+    
+    let _ = BRIDGE_CLASS.set(global_clazz.clone());
+    Ok(global_clazz)
 }
