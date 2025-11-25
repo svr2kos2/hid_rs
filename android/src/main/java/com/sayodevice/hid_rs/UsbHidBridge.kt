@@ -759,7 +759,6 @@ object UsbHidBridge {
                     }
                 }
             }
-        }
 
             if (bestIface == null && dev.interfaceCount > 0) {
                 bestIface = dev.getInterface(0)
