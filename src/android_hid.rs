@@ -646,12 +646,21 @@ pub extern "system" fn Java_com_sayodevice_hid_1rs_HidInit_initAndroidContext(
     _class: JObject,
     context: JObject,
 ) {
+    #[cfg(target_os = "android")]
+    // android_logger::init_once(
+    //     android_logger::Config::default().with_max_level(log::LevelFilter::Trace),
+    // );
+
+    log::error!("Java_com_sayodevice_hid_1rs_HidInit_initAndroidContext called");
     if let Ok(vm) = env.get_java_vm() {
+        log::error!("Got JavaVM");
         let _ = ANDROID_JVM.set(vm);
     }
     if let Ok(global_ctx) = env.new_global_ref(context) {
+        log::error!("Got GlobalRef");
         let _ = ANDROID_APP_CTX.set(global_ctx);
     }
+    log::error!("Java_com_sayodevice_hid_1rs_HidInit_initAndroidContext finished");
 }
 
 #[cfg(target_os = "android")]
