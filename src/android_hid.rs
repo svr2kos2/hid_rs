@@ -25,7 +25,33 @@ static DEVICE_REPORT_LISTENERS: Lazy<RwLock<HashMap<u128, Vec<SafeCallback2<u128
 static REPORT_READERS: Lazy<RwLock<HashSet<u128>>> = Lazy::new(|| RwLock::new(HashSet::new()));
 static REPORT_ABORT_FLAGS: Lazy<RwLock<HashMap<u128, Arc<AtomicBool>>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 
+fn log_enter(name: &str) {
+    log::debug!("ENTER {}", name);
+}
+
+fn log_exit(name: &str) {
+    log::debug!("EXIT {}", name);
+}
+
+struct FnLogger<'a> {
+    name: &'a str,
+}
+
+impl<'a> FnLogger<'a> {
+    fn new(name: &'a str) -> Self {
+        log_enter(name);
+        Self { name }
+    }
+}
+
+impl<'a> Drop for FnLogger<'a> {
+    fn drop(&mut self) {
+        log_exit(self.name);
+    }
+}
+
 pub(in crate) fn is_supported() -> bool {
+    let _fn_logger = FnLogger::new("android_hid::is_supported");
     #[cfg(target_os = "android")]
     {
         log::debug!("android_hid is_supported check");
@@ -51,11 +77,13 @@ pub(in crate) fn is_supported() -> bool {
 }
 
 pub(in crate) async fn init() -> Result<(), HidError> {
+    let _fn_logger = FnLogger::new("android_hid::init");
     log::debug!("android_hid init placeholder");
     Ok(())
 }
 
 pub(in crate) async fn request_device(vendor_ids: Vec<(u16, Option<u16>)>) -> Result<Vec<u128>, HidError> {
+    let _fn_logger = FnLogger::new("android_hid::request_device");
     #[cfg(target_os = "android")]
     {
         let (vm, ctx) = get_vm_and_context().map_err(|e| HidError::new(&e))?;
@@ -89,6 +117,7 @@ pub(in crate) async fn request_device(vendor_ids: Vec<(u16, Option<u16>)>) -> Re
 }
 
 pub(in crate) fn get_device_list() -> Result<Vec<u128>, HidError> {
+    let _fn_logger = FnLogger::new("android_hid::get_device_list");
     #[cfg(target_os = "android")]
     {
         let (vm, ctx) = get_vm_and_context().map_err(|e| HidError::new(&e))?;
@@ -117,6 +146,7 @@ pub(in crate) fn get_device_list() -> Result<Vec<u128>, HidError> {
 }
 
 pub(in crate) async fn sub_connection_changed(_callback: SafeCallback2<u128, bool>) -> Result<(), HidError> {
+    let _fn_logger = FnLogger::new("android_hid::sub_connection_changed");
     let callback = _callback;
 
     let current_ids = get_device_list().unwrap_or_default();
@@ -186,6 +216,7 @@ pub(in crate) async fn sub_connection_changed(_callback: SafeCallback2<u128, boo
 }
 
 pub(in crate) async fn unsub_connection_changed(_callback: SafeCallback2<u128, bool>) -> Result<(), HidError> {
+    let _fn_logger = FnLogger::new("android_hid::unsub_connection_changed");
     let callback = _callback;
 
     let snapshot: Vec<u128> = {
@@ -207,6 +238,7 @@ pub(in crate) async fn unsub_connection_changed(_callback: SafeCallback2<u128, b
 }
 
 pub(in crate) fn available(uuid: u128) -> bool {
+    let _fn_logger = FnLogger::new("android_hid::available");
     #[cfg(target_os = "android")]
     {
         if let Ok((vm, ctx)) = get_vm_and_context() {
@@ -233,6 +265,7 @@ pub(in crate) fn available(uuid: u128) -> bool {
 }
 
 pub(in crate) fn vid(uuid: u128) -> Result<u16, HidError> {
+    let _fn_logger = FnLogger::new("android_hid::vid");
     #[cfg(target_os = "android")]
     {
         let (vm, ctx) = get_vm_and_context().map_err(|e| HidError::new(&e))?;
@@ -260,6 +293,7 @@ pub(in crate) fn vid(uuid: u128) -> Result<u16, HidError> {
 }
 
 pub(in crate) fn pid(uuid: u128) -> Result<u16, HidError> {
+    let _fn_logger = FnLogger::new("android_hid::pid");
     #[cfg(target_os = "android")]
     {
         let (vm, ctx) = get_vm_and_context().map_err(|e| HidError::new(&e))?;
@@ -287,6 +321,7 @@ pub(in crate) fn pid(uuid: u128) -> Result<u16, HidError> {
 }
 
 pub(in crate) fn get_product_name(uuid: u128) -> Result<Option<String>, HidError> {
+    let _fn_logger = FnLogger::new("android_hid::get_product_name");
     #[cfg(target_os = "android")]
     {
         let (vm, ctx) = get_vm_and_context().map_err(|e| HidError::new(&e))?;
@@ -316,6 +351,7 @@ pub(in crate) fn get_product_name(uuid: u128) -> Result<Option<String>, HidError
 }
 
 pub(in crate) fn get_collections(uuid: u128) -> Result<HidReportDescriptor, HidError> {
+    let _fn_logger = FnLogger::new("android_hid::get_collections");
     #[cfg(target_os = "android")]
     {
         let (vm, ctx) = get_vm_and_context().map_err(|e| HidError::new(&e))?;
@@ -357,6 +393,7 @@ pub(in crate) fn get_collections(uuid: u128) -> Result<HidReportDescriptor, HidE
 }
 
 pub(in crate) fn has_report_id(uuid: u128, report_id: u8) -> Result<bool, HidError> {
+    let _fn_logger = FnLogger::new("android_hid::has_report_id");
     log::debug!("has_report_id called in android_hid {:02X?}", report_id);
     let desc = get_collections(uuid)?;
 
@@ -367,6 +404,7 @@ pub(in crate) fn has_report_id(uuid: u128, report_id: u8) -> Result<bool, HidErr
 }
 
 pub(in crate) async fn send_report(uuid: u128, data: &mut Vec<u8>) -> Result<usize, HidError> {
+    let _fn_logger = FnLogger::new("android_hid::send_report");
     #[cfg(target_os = "android")]
     {
         if data.is_empty() { return Err(HidError::new("Data cannot be empty")); }
@@ -440,10 +478,12 @@ pub(in crate) async fn send_firmware(
     _check_sum: u8,
     _on_progress: SafeCallback<f64>,
 ) -> Result<usize, HidError> {
+    let _fn_logger = FnLogger::new("android_hid::send_firmware");
     Err(HidError::new("not implemented"))
 }
 
 pub(in crate) async fn sub_report_arrive(uuid: u128, callback: SafeCallback2<u128, Vec<u8>>) -> Result<(), HidError> {
+    let _fn_logger = FnLogger::new("android_hid::sub_report_arrive");
     log::debug!("sub_report_arrive called for {:?}", uuid::Uuid::from_u128(uuid));
     {
         let mut map = DEVICE_REPORT_LISTENERS
@@ -606,6 +646,7 @@ pub(in crate) async fn sub_report_arrive(uuid: u128, callback: SafeCallback2<u12
 }
 
 pub(in crate) async fn unsub_report_arrive(uuid: u128, callback: SafeCallback2<u128, Vec<u8>>) -> Result<(), HidError> {
+    let _fn_logger = FnLogger::new("android_hid::unsub_report_arrive");
     let mut should_stop = false;
     {
         let mut map = DEVICE_REPORT_LISTENERS
@@ -633,6 +674,7 @@ pub(in crate) async fn unsub_report_arrive(uuid: u128, callback: SafeCallback2<u
 // ===== JNI helpers (Android only) =====
 #[cfg(target_os = "android")]
 fn get_vm_and_context() -> Result<(&'static JavaVM, GlobalRef), String> {
+    let _fn_logger = FnLogger::new("android_hid::get_vm_and_context");
     match (ANDROID_JVM.get(), ANDROID_APP_CTX.get()) {
         (Some(vm), Some(ctx)) => Ok((vm, ctx.clone())),
         _ => Err("android context was not initialized".to_string()),
@@ -646,6 +688,7 @@ pub extern "system" fn Java_com_sayodevice_hid_1rs_HidInit_initAndroidContext(
     _class: JObject,
     context: JObject,
 ) {
+    let _fn_logger = FnLogger::new("android_hid::Java_com_sayodevice_hid_1rs_HidInit_initAndroidContext");
     #[cfg(target_os = "android")]
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Trace),
@@ -665,6 +708,7 @@ pub extern "system" fn Java_com_sayodevice_hid_1rs_HidInit_initAndroidContext(
 
 #[cfg(target_os = "android")]
 fn call_bridge_is_supported(env: &mut JNIEnv<'_>, context: &GlobalRef) -> Result<bool, String> {
+    let _fn_logger = FnLogger::new("android_hid::call_bridge_is_supported");
     log::debug!("call_bridge_is_supported entered");
     let gclass = load_bridge_class(env, context)?;
     let local_class = env.new_local_ref(gclass.as_obj()).map_err(|e| format!("new_local_ref(class): {e:?}"))?;
@@ -682,6 +726,7 @@ fn call_bridge_is_supported(env: &mut JNIEnv<'_>, context: &GlobalRef) -> Result
 
 #[cfg(target_os = "android")]
 fn load_bridge_class(env: &mut JNIEnv<'_>, context: &GlobalRef) -> Result<GlobalRef, String> {
+    let _fn_logger = FnLogger::new("android_hid::load_bridge_class");
     let loader_obj = env
         .call_method(
             context.as_obj(),

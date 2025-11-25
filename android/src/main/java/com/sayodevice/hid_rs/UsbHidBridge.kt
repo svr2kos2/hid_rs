@@ -37,130 +37,191 @@ object UsbHidBridge {
     // Track in-flight requests for cooperative cancellation on stop
     private val inputRequests = ConcurrentHashMap<String, MutableList<android.hardware.usb.UsbRequest>>()
 
-    private fun ensureInputListenerRunning(context: Context, uuid: String, hintMaxLen: Int = 0) {
-        if (inputThreads.containsKey(uuid)) return
-        val dc = ensureConnection(context, uuid) ?: run {
-            FlutterLogger.w(TAG, "ensureInputListenerRunning: no connection for $uuid")
-            return
-        }
-        val inEp = dc.inEp ?: run {
-            FlutterLogger.w(TAG, "ensureInputListenerRunning: no IN endpoint for $uuid")
-            return
-        }
-        val packetSize = kotlin.math.max(1, inEp.maxPacketSize)
-        val desired = if (hintMaxLen > 0) kotlin.math.max(hintMaxLen, packetSize) else packetSize
-        FlutterLogger.d(TAG, "ensureInputListenerRunning($uuid) -> starting listener len=$desired")
-        startInputListener(context, uuid, desired)
+    private fun logEnter(fn: String) {
+        FlutterLogger.d(TAG, "ENTER $fn")
     }
 
-    private fun deviceKey(dev: UsbDevice): String =
-        listOf(dev.vendorId, dev.productId, dev.deviceName ?: "", safeSerial(dev)).joinToString(":")
+    private fun logExit(fn: String) {
+        FlutterLogger.d(TAG, "EXIT $fn")
+    }
 
-    private fun safeSerial(dev: UsbDevice): String = try {
-        dev.serialNumber ?: ""
-    } catch (_: SecurityException) {
-        ""
-    } catch (_: Throwable) {
-        ""
+    private fun ensureInputListenerRunning(context: Context, uuid: String, hintMaxLen: Int = 0) {
+        logEnter("ensureInputListenerRunning")
+        try {
+            if (inputThreads.containsKey(uuid)) return
+            val dc = ensureConnection(context, uuid) ?: run {
+                FlutterLogger.w(TAG, "ensureInputListenerRunning: no connection for $uuid")
+                return
+            }
+            val inEp = dc.inEp ?: run {
+                FlutterLogger.w(TAG, "ensureInputListenerRunning: no IN endpoint for $uuid")
+                return
+            }
+            val packetSize = kotlin.math.max(1, inEp.maxPacketSize)
+            val desired = if (hintMaxLen > 0) kotlin.math.max(hintMaxLen, packetSize) else packetSize
+            FlutterLogger.d(TAG, "ensureInputListenerRunning($uuid) -> starting listener len=$desired")
+            startInputListener(context, uuid, desired)
+        } finally {
+            logExit("ensureInputListenerRunning")
+        }
+    }
+
+    private fun deviceKey(dev: UsbDevice): String {
+        logEnter("deviceKey")
+        return try {
+            listOf(dev.vendorId, dev.productId, dev.deviceName ?: "", safeSerial(dev)).joinToString(":")
+        } finally {
+            logExit("deviceKey")
+        }
+    }
+
+    private fun safeSerial(dev: UsbDevice): String {
+        logEnter("safeSerial")
+        return try {
+            dev.serialNumber ?: ""
+        } catch (_: SecurityException) {
+            ""
+        } catch (_: Throwable) {
+            ""
+        } finally {
+            logExit("safeSerial")
+        }
     }
 
     private fun snapshotUsbDevices(context: Context): Pair<UsbManager, List<UsbDevice>> {
-        val usb = context.getSystemService(Context.USB_SERVICE) as UsbManager
-        val devices = usb.deviceList.values.toList()
-        cleanupStaleDevices(devices)
-        return usb to devices
+        logEnter("snapshotUsbDevices")
+        return try {
+            val usb = context.getSystemService(Context.USB_SERVICE) as UsbManager
+            val devices = usb.deviceList.values.toList()
+            cleanupStaleDevices(devices)
+            usb to devices
+        } finally {
+            logExit("snapshotUsbDevices")
+        }
     }
 
     private fun cleanupStaleDevices(currentDevices: Collection<UsbDevice>) {
-    val currentKeys = currentDevices.map { deviceKey(it) }.toSet()
-        val keysSnapshot = uuidByDeviceKey.keys.toList()
-        for (key in keysSnapshot) {
-            if (!currentKeys.contains(key)) {
-                val uuid = uuidByDeviceKey.remove(key) ?: continue
-                deviceKeyByUuid.remove(uuid)
-                tearDownDevice(uuid)
+        logEnter("cleanupStaleDevices")
+        try {
+            val currentKeys = currentDevices.map { deviceKey(it) }.toSet()
+            val keysSnapshot = uuidByDeviceKey.keys.toList()
+            for (key in keysSnapshot) {
+                if (!currentKeys.contains(key)) {
+                    val uuid = uuidByDeviceKey.remove(key) ?: continue
+                    deviceKeyByUuid.remove(uuid)
+                    tearDownDevice(uuid)
+                }
             }
+        } finally {
+            logExit("cleanupStaleDevices")
         }
     }
 
     private fun ensureUuidForDevice(dev: UsbDevice): String {
-        val key = deviceKey(dev)
-        uuidByDeviceKey[key]?.let { existing ->
-            deviceUuidMap[existing] = dev
-            deviceKeyByUuid[existing] = key
-            return existing
-        }
+        logEnter("ensureUuidForDevice")
+        return try {
+            val key = deviceKey(dev)
+            uuidByDeviceKey[key]?.let { existing ->
+                deviceUuidMap[existing] = dev
+                deviceKeyByUuid[existing] = key
+                return existing
+            }
 
-        val newUuid = UUID.randomUUID().toString()
-        uuidByDeviceKey[key] = newUuid
-        deviceKeyByUuid[newUuid] = key
-        deviceUuidMap[newUuid] = dev
-        return newUuid
+            val newUuid = UUID.randomUUID().toString()
+            uuidByDeviceKey[key] = newUuid
+            deviceKeyByUuid[newUuid] = key
+            deviceUuidMap[newUuid] = dev
+            newUuid
+        } finally {
+            logExit("ensureUuidForDevice")
+        }
     }
 
     private fun resolveDevice(uuid: String, usb: UsbManager, currentDevices: List<UsbDevice>): UsbDevice? {
-        val key = deviceKeyByUuid[uuid] ?: return null
-        val found = currentDevices.firstOrNull { deviceKey(it) == key } ?: return null
-        if (uuidByDeviceKey[key] != uuid) {
-            return null
+        logEnter("resolveDevice")
+        return try {
+            val key = deviceKeyByUuid[uuid] ?: return null
+            val found = currentDevices.firstOrNull { deviceKey(it) == key } ?: return null
+            if (uuidByDeviceKey[key] != uuid) {
+                return null
+            }
+            deviceUuidMap[uuid] = found
+            found
+        } finally {
+            logExit("resolveDevice")
         }
-        deviceUuidMap[uuid] = found
-        return found
     }
 
     private fun tearDownDevice(uuid: String) {
-        stopInputListener(uuid)
-        inputThreads.remove(uuid)?.interrupt()
-        inputAbort.remove(uuid)
-        inputQueues.remove(uuid)?.clear()
-        inputRequests.remove(uuid)?.forEach { request ->
-            try {
-                request.close()
-            } catch (_: Throwable) {
+        logEnter("tearDownDevice")
+        try {
+            stopInputListener(uuid)
+            inputThreads.remove(uuid)?.interrupt()
+            inputAbort.remove(uuid)
+            inputQueues.remove(uuid)?.clear()
+            inputRequests.remove(uuid)?.forEach { request ->
+                try {
+                    request.close()
+                } catch (_: Throwable) {
+                }
             }
+            connections.remove(uuid)?.let { conn ->
+                try {
+                    conn.conn.releaseInterface(conn.iface)
+                } catch (_: Throwable) {
+                }
+                try {
+                    conn.conn.close()
+                } catch (_: Throwable) {
+                }
+            }
+            deviceUuidMap.remove(uuid)
+            deviceKeyByUuid.remove(uuid)
+        } finally {
+            logExit("tearDownDevice")
         }
-        connections.remove(uuid)?.let { conn ->
-            try {
-                conn.conn.releaseInterface(conn.iface)
-            } catch (_: Throwable) {
-            }
-            try {
-                conn.conn.close()
-            } catch (_: Throwable) {
-            }
-        }
-        deviceUuidMap.remove(uuid)
-        deviceKeyByUuid.remove(uuid)
     }
 
     @JvmStatic
     fun isSupported(context: Context): Boolean {
-        val hasUsb = context.packageManager.hasSystemFeature("android.hardware.usb.host")
-        FlutterLogger.i(TAG, "isSupported -> USB host supported = $hasUsb")
-        return hasUsb
+        logEnter("isSupported")
+        return try {
+            val hasUsb = context.packageManager.hasSystemFeature("android.hardware.usb.host")
+            FlutterLogger.i(TAG, "isSupported -> USB host supported = $hasUsb")
+            hasUsb
+        } finally {
+            logExit("isSupported")
+        }
     }
 
     @JvmStatic
     fun listDevices(context: Context): List<Map<String, Any>> {
-    val usb = context.getSystemService(Context.USB_SERVICE) as UsbManager
-        val res = mutableListOf<Map<String, Any>>()
-        for (entry in usb.deviceList.values) {
-            val dev = entry
-            res.add(
-                mapOf(
-                    "vendorId" to dev.vendorId,
-                    "productId" to dev.productId,
-                    "deviceName" to (dev.deviceName ?: ""),
-                    "productName" to (tryGetProductName(dev) ?: "")
+        logEnter("listDevices")
+        return try {
+            val usb = context.getSystemService(Context.USB_SERVICE) as UsbManager
+            val res = mutableListOf<Map<String, Any>>()
+            for (entry in usb.deviceList.values) {
+                val dev = entry
+                res.add(
+                    mapOf(
+                        "vendorId" to dev.vendorId,
+                        "productId" to dev.productId,
+                        "deviceName" to (dev.deviceName ?: ""),
+                        "productName" to (tryGetProductName(dev) ?: "")
+                    )
                 )
-            )
+            }
+            FlutterLogger.d(TAG, "listDevices -> Found ${res.size} USB devices")
+            res
+        } finally {
+            logExit("listDevices")
         }
-        FlutterLogger.d(TAG, "listDevices -> Found ${res.size} USB devices")
-        return res
     }
 
     @JvmStatic
     fun requestDevices(context: Context, filtersJson: String): Array<String> {
+        logEnter("requestDevices")
+        try {
         // Align semantics with Web: prompt for permission and return only the first
         // device the user grants permission to (from the filtered set). This call
         // blocks (polling) for a short time to wait for permission result.
@@ -214,45 +275,82 @@ object UsbHidBridge {
             FlutterLogger.w(TAG, "requestDevices -> requestPermission threw: $t")
             emptyArray()
         }
+        } finally {
+            logExit("requestDevices")
+        }
     }
 
     @JvmStatic
     fun requestDevicesJson(context: Context, filtersJson: String): String {
-        return JSONArray(requestDevices(context, filtersJson).toList()).toString()
+        logEnter("requestDevicesJson")
+        return try {
+            JSONArray(requestDevices(context, filtersJson).toList()).toString()
+        } finally {
+            logExit("requestDevicesJson")
+        }
     }
 
     @JvmStatic
     fun getDeviceList(context: Context): Array<String> {
-        // Only return devices that already have permission and can be opened/claimed
-        val (usb, devices) = snapshotUsbDevices(context)
-        val uuids = mutableListOf<String>()
-        for (dev in devices) {
-            if (!usb.hasPermission(dev)) continue
-            val uuid = ensureUuidForDevice(dev)
-            // ensureConnection will cache a connection on success
-            if (ensureConnection(context, uuid) != null) {
-                uuids.add(uuid)
+        logEnter("getDeviceList")
+        return try {
+            // Only return devices that already have permission and can be opened/claimed
+            val (usb, devices) = snapshotUsbDevices(context)
+            val uuids = mutableListOf<String>()
+            for (dev in devices) {
+                if (!usb.hasPermission(dev)) continue
+                val uuid = ensureUuidForDevice(dev)
+                // ensureConnection will cache a connection on success
+                if (ensureConnection(context, uuid) != null) {
+                    uuids.add(uuid)
+                }
             }
+            FlutterLogger.d(TAG, "getDeviceList -> returning ${uuids.size} ready devices")
+            uuids.toTypedArray()
+        } finally {
+            logExit("getDeviceList")
         }
-        FlutterLogger.d(TAG, "getDeviceList -> returning ${uuids.size} ready devices")
-        return uuids.toTypedArray()
     }
 
     @JvmStatic
     fun getDeviceListJson(context: Context): String {
-        return JSONArray(getDeviceList(context).toList()).toString()
+        logEnter("getDeviceListJson")
+        return try {
+            JSONArray(getDeviceList(context).toList()).toString()
+        } finally {
+            logExit("getDeviceListJson")
+        }
     }
 
     @JvmStatic
-    fun getVid(uuid: String): Int = deviceUuidMap[uuid]?.vendorId ?: -1
+    fun getVid(uuid: String): Int {
+        logEnter("getVid")
+        return try {
+            deviceUuidMap[uuid]?.vendorId ?: -1
+        } finally {
+            logExit("getVid")
+        }
+    }
 
     @JvmStatic
-    fun getPid(uuid: String): Int = deviceUuidMap[uuid]?.productId ?: -1
+    fun getPid(uuid: String): Int {
+        logEnter("getPid")
+        return try {
+            deviceUuidMap[uuid]?.productId ?: -1
+        } finally {
+            logExit("getPid")
+        }
+    }
 
     @JvmStatic
     fun getProductName(uuid: String): String? {
-        val dev = deviceUuidMap[uuid] ?: return null
-        return tryGetProductName(dev)
+        logEnter("getProductName")
+        return try {
+            val dev = deviceUuidMap[uuid] ?: return null
+            tryGetProductName(dev)
+        } finally {
+            logExit("getProductName")
+        }
     }
 
     data class DeviceConn(
@@ -265,35 +363,46 @@ object UsbHidBridge {
 
     @JvmStatic
     fun hasPermission(context: Context, uuid: String): Boolean {
-        val (usb, devices) = snapshotUsbDevices(context)
-        val dev = resolveDevice(uuid, usb, devices) ?: return false
-        return usb.hasPermission(dev)
+        logEnter("hasPermission")
+        return try {
+            val (usb, devices) = snapshotUsbDevices(context)
+            val dev = resolveDevice(uuid, usb, devices) ?: return false
+            usb.hasPermission(dev)
+        } finally {
+            logExit("hasPermission")
+        }
     }
 
     @JvmStatic
     fun requestPermission(context: Context, uuid: String): Boolean {
-        val (usb, devices) = snapshotUsbDevices(context)
-        val dev = resolveDevice(uuid, usb, devices) ?: return false
-        if (usb.hasPermission(dev)) return true
-        // Use explicit, immutable PendingIntent to satisfy Android 14+ restrictions
-        val appCtx = context.applicationContext
-        val intent = Intent(appCtx, UsbPermissionReceiver::class.java).apply {
-            action = ACTION_USB_PERMISSION
-        }
-        val flags = if (android.os.Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0
-        val pi = PendingIntent.getBroadcast(appCtx, 0, intent, flags)
+        logEnter("requestPermission")
         return try {
-            FlutterLogger.i(TAG, "requestPermission(uuid=$uuid) -> requesting permission")
-            usb.requestPermission(dev, pi)
-            false // permission result async; caller should poll via hasPermission/getDeviceList
-        } catch (t: Throwable) {
-            FlutterLogger.w(TAG, "requestPermission(uuid=$uuid) failed: $t")
-            false
+            val (usb, devices) = snapshotUsbDevices(context)
+            val dev = resolveDevice(uuid, usb, devices) ?: return false
+            if (usb.hasPermission(dev)) return true
+            // Use explicit, immutable PendingIntent to satisfy Android 14+ restrictions
+            val appCtx = context.applicationContext
+            val intent = Intent(appCtx, UsbPermissionReceiver::class.java).apply {
+                action = ACTION_USB_PERMISSION
+            }
+            val flags = if (android.os.Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0
+            val pi = PendingIntent.getBroadcast(appCtx, 0, intent, flags)
+            try {
+                FlutterLogger.i(TAG, "requestPermission(uuid=$uuid) -> requesting permission")
+                usb.requestPermission(dev, pi)
+                false // permission result async; caller should poll via hasPermission/getDeviceList
+            } catch (t: Throwable) {
+                FlutterLogger.w(TAG, "requestPermission(uuid=$uuid) failed: $t")
+                false
+            }
+        } finally {
+            logExit("requestPermission")
         }
     }
 
     @JvmStatic
     fun available(context: Context, uuid: String): Boolean {
+        logEnter("available")
         return try {
             val ok = ensureConnection(context, uuid) != null
             FlutterLogger.d(TAG, "available(uuid=$uuid) -> $ok")
@@ -301,56 +410,69 @@ object UsbHidBridge {
         } catch (t: Throwable) {
             FlutterLogger.w(TAG, "available(uuid=$uuid) failed: $t")
             false
+        } finally {
+            logExit("available")
         }
     }
 
     @JvmStatic
     fun sendOutputReport(context: Context, uuid: String, data: ByteArray): Int {
-        val dc = ensureConnection(context, uuid) ?: run { FlutterLogger.w(TAG, "sendOutputReport: no connection for $uuid"); return -1 }
-        ensureInputListenerRunning(context, uuid)
-        FlutterLogger.d(TAG, "sendOutputReport(uuid=$uuid) -> len=${data.size} outEp=${dc.outEp != null}")
-        FlutterLogger.v(TAG, "sendOutputReport(uuid=$uuid) data=${toHex(data, 64)}")
-        // Prefer interrupt/bulk OUT endpoint
-        dc.outEp?.let { out ->
-            val written = dc.conn.bulkTransfer(out, data, data.size, 1000)
-            FlutterLogger.d(TAG, "sendOutputReport(uuid=$uuid) bulkTransfer -> ${written ?: -1}")
-            return written ?: -1
+        logEnter("sendOutputReport")
+        return try {
+            val dc = ensureConnection(context, uuid) ?: run { FlutterLogger.w(TAG, "sendOutputReport: no connection for $uuid"); return -1 }
+            ensureInputListenerRunning(context, uuid)
+            FlutterLogger.d(TAG, "sendOutputReport(uuid=$uuid) -> len=${data.size} outEp=${dc.outEp != null}")
+            FlutterLogger.v(TAG, "sendOutputReport(uuid=$uuid) data=${toHex(data, 64)}")
+            // Prefer interrupt/bulk OUT endpoint
+            dc.outEp?.let { out ->
+                val written = dc.conn.bulkTransfer(out, data, data.size, 1000)
+                FlutterLogger.d(TAG, "sendOutputReport(uuid=$uuid) bulkTransfer -> ${written ?: -1}")
+                return written ?: -1
+            }
+            // Fallback to HID Set_Report via control transfer (class, interface)
+            // bmRequestType: 0x21 (Host to device | Class | Interface)
+            // bRequest: 0x09 (SET_REPORT)
+            // wValue: (ReportType << 8) | ReportID; we assume Output(2) and ReportID 0
+            val reqType = 0x21
+            val request = 0x09
+            val wValue = (2 shl 8) or 0
+            val wIndex = dc.iface.id
+            val sent = dc.conn.controlTransfer(reqType, request, wValue, wIndex, data, data.size, 1000)
+            FlutterLogger.d(TAG, "sendOutputReport(uuid=$uuid) controlTransfer -> $sent")
+            sent
+        } finally {
+            logExit("sendOutputReport")
         }
-        // Fallback to HID Set_Report via control transfer (class, interface)
-        // bmRequestType: 0x21 (Host to device | Class | Interface)
-        // bRequest: 0x09 (SET_REPORT)
-        // wValue: (ReportType << 8) | ReportID; we assume Output(2) and ReportID 0
-        val reqType = 0x21
-        val request = 0x09
-        val wValue = (2 shl 8) or 0
-        val wIndex = dc.iface.id
-        val sent = dc.conn.controlTransfer(reqType, request, wValue, wIndex, data, data.size, 1000)
-        FlutterLogger.d(TAG, "sendOutputReport(uuid=$uuid) controlTransfer -> $sent")
-        return sent
     }
 
     @JvmStatic
     fun readInputReport(context: Context, uuid: String, maxLen: Int, timeoutMs: Int): ByteArray? {
-        val dc = ensureConnection(context, uuid) ?: run { FlutterLogger.w(TAG, "readInputReport: no connection for $uuid"); return null }
-        val ep = dc.inEp ?: return null
-        val buf = ByteArray(maxLen)
-        // FlutterLogger.d(TAG, "readInputReport: bulkTransfer IN maxLen=$maxLen timeout=$timeoutMs")
-        val n = dc.conn.bulkTransfer(ep, buf, maxLen, timeoutMs)
-        return if (n != null && n > 0) buf.copyOf(n) else null
+        logEnter("readInputReport")
+        return try {
+            val dc = ensureConnection(context, uuid) ?: run { FlutterLogger.w(TAG, "readInputReport: no connection for $uuid"); return null }
+            val ep = dc.inEp ?: return null
+            val buf = ByteArray(maxLen)
+            val n = dc.conn.bulkTransfer(ep, buf, maxLen, timeoutMs)
+            if (n != null && n > 0) buf.copyOf(n) else null
+        } finally {
+            logExit("readInputReport")
+        }
     }
 
     // Start a background listener that blocks on UsbRequest.requestWait and pushes bytes into a queue
     @JvmStatic
     fun startInputListener(context: Context, uuid: String, maxLen: Int): Boolean {
-        val dc = ensureConnection(context, uuid) ?: run { FlutterLogger.w(TAG, "startInputListener: no connection for $uuid"); return false }
-        val inEp = dc.inEp ?: run { FlutterLogger.w(TAG, "startInputListener: no IN endpoint for $uuid"); return false }
-        if (inputThreads.containsKey(uuid)) { FlutterLogger.d(TAG, "startInputListener: already running for $uuid"); return true }
+        logEnter("startInputListener")
+        try {
+            val dc = ensureConnection(context, uuid) ?: run { FlutterLogger.w(TAG, "startInputListener: no connection for $uuid"); return false }
+            val inEp = dc.inEp ?: run { FlutterLogger.w(TAG, "startInputListener: no IN endpoint for $uuid"); return false }
+            if (inputThreads.containsKey(uuid)) { FlutterLogger.d(TAG, "startInputListener: already running for $uuid"); return true }
 
-        val queue = inputQueues.getOrPut(uuid) { java.util.concurrent.LinkedBlockingQueue() }
-        val abort = inputAbort.getOrPut(uuid) { java.util.concurrent.atomic.AtomicBoolean(false) }
-        abort.set(false)
+            val queue = inputQueues.getOrPut(uuid) { java.util.concurrent.LinkedBlockingQueue() }
+            val abort = inputAbort.getOrPut(uuid) { java.util.concurrent.atomic.AtomicBoolean(false) }
+            abort.set(false)
 
-        val t = Thread({
+            val t = Thread({
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
             val ep = inEp
             // Prefer UsbRequest queueing for async reads; fall back to bulkTransfer if request setup fails
@@ -452,196 +574,231 @@ object UsbHidBridge {
             }
             FlutterLogger.d(TAG, "startInputListener($uuid) thread exiting")
         }, "UsbInputListener-$uuid")
-        inputThreads[uuid] = t
-        t.start()
-        return true
+            inputThreads[uuid] = t
+            t.start()
+            return true
+        } finally {
+            logExit("startInputListener")
+        }
     }
 
     @JvmStatic
     fun stopInputListener(uuid: String) {
-        inputAbort[uuid]?.set(true)
-        FlutterLogger.d(TAG, "stopInputListener($uuid)")
-        // Best-effort: actively cancel any in-flight requests to unblock requestWait
-        inputRequests[uuid]?.let { list ->
-            synchronized(list) {
-                list.forEach { r ->
-                    try { r.cancel() } catch (_: Throwable) {}
+        logEnter("stopInputListener")
+        try {
+            inputAbort[uuid]?.set(true)
+            FlutterLogger.d(TAG, "stopInputListener($uuid)")
+            // Best-effort: actively cancel any in-flight requests to unblock requestWait
+            inputRequests[uuid]?.let { list ->
+                synchronized(list) {
+                    list.forEach { r ->
+                        try { r.cancel() } catch (_: Throwable) {}
+                    }
                 }
             }
+            // The worker thread will close and clean up
+        } finally {
+            logExit("stopInputListener")
         }
-        // The worker thread will close and clean up
     }
 
     @JvmStatic
     fun takeInputReport(context: Context, uuid: String, timeoutMs: Int): ByteArray? {
-        ensureConnection(context, uuid) ?: return null
-        ensureInputListenerRunning(context, uuid)
-        val q = inputQueues[uuid] ?: return null
-        return try {
-            val sizeBefore = q.size
-            FlutterLogger.d(TAG, "takeInputReport($uuid) waiting timeout=$timeoutMs queueSize=$sizeBefore")
-            val result = if (timeoutMs <= 0) q.take() else q.poll(timeoutMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
-            if (result != null) {
-                FlutterLogger.d(TAG, "takeInputReport($uuid) -> len=${result.size}")
-            } else {
-                FlutterLogger.d(TAG, "takeInputReport($uuid) -> timeout after ${timeoutMs}ms")
+        logEnter("takeInputReport")
+        try {
+            ensureConnection(context, uuid) ?: return null
+            ensureInputListenerRunning(context, uuid)
+            val q = inputQueues[uuid] ?: return null
+            return try {
+                val sizeBefore = q.size
+                FlutterLogger.d(TAG, "takeInputReport($uuid) waiting timeout=$timeoutMs queueSize=$sizeBefore")
+                val result = if (timeoutMs <= 0) q.take() else q.poll(timeoutMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
+                if (result != null) {
+                    FlutterLogger.d(TAG, "takeInputReport($uuid) -> len=${result.size}")
+                } else {
+                    FlutterLogger.d(TAG, "takeInputReport($uuid) -> timeout after ${timeoutMs}ms")
+                }
+                result
+            } catch (_: InterruptedException) {
+                null
             }
-            result
-        } catch (_: InterruptedException) {
-            null
+        } finally {
+            logExit("takeInputReport")
         }
     }
 
     @JvmStatic
     fun getReportDescriptor(context: Context, uuid: String, maxLen: Int): ByteArray? {
-        val dc = ensureConnection(context, uuid) ?: run { FlutterLogger.w(TAG, "getReportDescriptor: no connection for $uuid"); return null }
-        val iface = dc.iface
-        val buf = ByteArray(maxLen)
-        // Standard GET_DESCRIPTOR request for HID Report Descriptor at the interface level
-        val bmRequestType = 0x81 // Device-to-host | Standard | Interface
-        val bRequest = 0x06 // GET_DESCRIPTOR
-        val wValue = (0x22 shl 8) or 0 // REPORT descriptor type
-        val wIndex = iface.id
-        FlutterLogger.d(TAG, "getReportDescriptor: controlTransfer GET_DESCRIPTOR len=$maxLen if=${iface.id}")
-        val n = dc.conn.controlTransfer(bmRequestType, bRequest, wValue, wIndex, buf, maxLen, 1000)
-        return if (n != null && n > 0) buf.copyOf(n) else null
-    }
-
-    private fun ensureConnection(context: Context, uuid: String): DeviceConn? {
-        val (usb, devices) = snapshotUsbDevices(context)
-        val dev = resolveDevice(uuid, usb, devices) ?: return null
-
-        connections[uuid]?.let { existing ->
-            val sameDevice = try {
-                deviceKey(existing.device) == deviceKey(dev)
-            } catch (_: Throwable) {
-                false
-            }
-            if (sameDevice && usb.hasPermission(dev)) {
-                deviceUuidMap[uuid] = dev
-                FlutterLogger.d(TAG, "ensureConnection($uuid) -> cached")
-                return existing
-            }
-            connections.remove(uuid)
-            try {
-                existing.conn.releaseInterface(existing.iface)
-            } catch (_: Throwable) {
-            }
-            try {
-                existing.conn.close()
-            } catch (_: Throwable) {
-            }
-        }
-
-        if (!usb.hasPermission(dev)) return null
-        FlutterLogger.d(TAG, "ensureConnection($uuid) -> opening device ${dev.deviceName}")
-        val conn = usb.openDevice(dev) ?: run { FlutterLogger.w(TAG, "ensureConnection($uuid) -> openDevice returned null"); return null }
-        // Choose the best HID interface. Prefer:
-        // 1) An interface whose report descriptor contains Report IDs 0x02/0x21/0x22
-        // 2) Any interface that contains any Report ID (0x85)
-        // 3) A non-boot HID interface (subclass 0, protocol 0)
-        // 4) Otherwise, the first HID interface
-        var bestIface: UsbInterface? = null
-        var hasSpecificIds = false
-        var hasAnyIds = false
-        var nonBootCandidate: UsbInterface? = null
-
-        fun tryReadReportDescriptor(tmpConn: UsbDeviceConnection, intf: UsbInterface, maxLen: Int = 1024): ByteArray? {
+        logEnter("getReportDescriptor")
+        return try {
+            val dc = ensureConnection(context, uuid) ?: run { FlutterLogger.w(TAG, "getReportDescriptor: no connection for $uuid"); return null }
+            val iface = dc.iface
             val buf = ByteArray(maxLen)
+            // Standard GET_DESCRIPTOR request for HID Report Descriptor at the interface level
             val bmRequestType = 0x81 // Device-to-host | Standard | Interface
             val bRequest = 0x06 // GET_DESCRIPTOR
             val wValue = (0x22 shl 8) or 0 // REPORT descriptor type
-            val wIndex = intf.id
-            val n = tmpConn.controlTransfer(bmRequestType, bRequest, wValue, wIndex, buf, maxLen, 200)
-            return if (n != null && n > 0) buf.copyOf(n) else null
+            val wIndex = iface.id
+            FlutterLogger.d(TAG, "getReportDescriptor: controlTransfer GET_DESCRIPTOR len=$maxLen if=${iface.id}")
+            val n = dc.conn.controlTransfer(bmRequestType, bRequest, wValue, wIndex, buf, maxLen, 1000)
+            if (n != null && n > 0) buf.copyOf(n) else null
+        } finally {
+            logExit("getReportDescriptor")
         }
+    }
 
-        for (i in 0 until dev.interfaceCount) {
-            val intf = dev.getInterface(i)
-            if (intf.interfaceClass != 3 /* HID */) continue
+    private fun ensureConnection(context: Context, uuid: String): DeviceConn? {
+        logEnter("ensureConnection")
+        return try {
+            val (usb, devices) = snapshotUsbDevices(context)
+            val dev = resolveDevice(uuid, usb, devices) ?: return null
 
-            // Track a non-boot HID as a fallback candidate
-            if (intf.interfaceSubclass == 0 && intf.interfaceProtocol == 0 && nonBootCandidate == null) {
-                nonBootCandidate = intf
+            connections[uuid]?.let { existing ->
+                val sameDevice = try {
+                    deviceKey(existing.device) == deviceKey(dev)
+                } catch (_: Throwable) {
+                    false
+                }
+                if (sameDevice && usb.hasPermission(dev)) {
+                    deviceUuidMap[uuid] = dev
+                    FlutterLogger.d(TAG, "ensureConnection($uuid) -> cached")
+                    return existing
+                }
+                connections.remove(uuid)
+                try {
+                    existing.conn.releaseInterface(existing.iface)
+                } catch (_: Throwable) {
+                }
+                try {
+                    existing.conn.close()
+                } catch (_: Throwable) {
+                }
             }
 
-            // Probe this interface's report descriptor
-            val claimed = conn.claimInterface(intf, true)
-            if (!claimed) {
-                FlutterLogger.w(TAG, "ensureConnection($uuid) -> could not claim iface idx=$i class=3 sub=${intf.interfaceSubclass} proto=${intf.interfaceProtocol}")
-                continue
-            }
-            val desc = tryReadReportDescriptor(conn, intf)
-            // Release immediately if not chosen later
-            conn.releaseInterface(intf)
+            if (!usb.hasPermission(dev)) return null
+            FlutterLogger.d(TAG, "ensureConnection($uuid) -> opening device ${dev.deviceName}")
+            val conn = usb.openDevice(dev) ?: run { FlutterLogger.w(TAG, "ensureConnection($uuid) -> openDevice returned null"); return null }
+            // Choose the best HID interface. Prefer:
+            // 1) An interface whose report descriptor contains Report IDs 0x02/0x21/0x22
+            // 2) Any interface that contains any Report ID (0x85)
+            // 3) A non-boot HID interface (subclass 0, protocol 0)
+            // 4) Otherwise, the first HID interface
+            var bestIface: UsbInterface? = null
+            var hasSpecificIds = false
+            var hasAnyIds = false
+            var nonBootCandidate: UsbInterface? = null
 
-            if (desc != null) {
-                val has85 = desc.contains(0x85.toByte())
-                val matchSpecific = run {
-                    var found = false
-                    var j = 0
-                    while (j < desc.size - 1) {
-                        if (desc[j] == 0x85.toByte()) {
-                            val id = desc[j + 1]
-                            if (id == 0x02.toByte() || id == 0x21.toByte() || id == 0x22.toByte()) { found = true; break }
-                            j += 2; continue
+            fun tryReadReportDescriptor(tmpConn: UsbDeviceConnection, intf: UsbInterface, maxLen: Int = 1024): ByteArray? {
+                logEnter("tryReadReportDescriptor")
+                return try {
+                    val buf = ByteArray(maxLen)
+                    val bmRequestType = 0x81 // Device-to-host | Standard | Interface
+                    val bRequest = 0x06 // GET_DESCRIPTOR
+                    val wValue = (0x22 shl 8) or 0 // REPORT descriptor type
+                    val wIndex = intf.id
+                    val n = tmpConn.controlTransfer(bmRequestType, bRequest, wValue, wIndex, buf, maxLen, 200)
+                    if (n != null && n > 0) buf.copyOf(n) else null
+                } finally {
+                    logExit("tryReadReportDescriptor")
+                }
+            }
+
+            for (i in 0 until dev.interfaceCount) {
+                val intf = dev.getInterface(i)
+                if (intf.interfaceClass != 3 /* HID */) continue
+
+                // Track a non-boot HID as a fallback candidate
+                if (intf.interfaceSubclass == 0 && intf.interfaceProtocol == 0 && nonBootCandidate == null) {
+                    nonBootCandidate = intf
+                }
+
+                // Probe this interface's report descriptor
+                val claimed = conn.claimInterface(intf, true)
+                if (!claimed) {
+                    FlutterLogger.w(TAG, "ensureConnection($uuid) -> could not claim iface idx=$i class=3 sub=${intf.interfaceSubclass} proto=${intf.interfaceProtocol}")
+                    continue
+                }
+                val desc = tryReadReportDescriptor(conn, intf)
+                // Release immediately if not chosen later
+                conn.releaseInterface(intf)
+
+                if (desc != null) {
+                    val has85 = desc.contains(0x85.toByte())
+                    val matchSpecific = run {
+                        var found = false
+                        var j = 0
+                        while (j < desc.size - 1) {
+                            if (desc[j] == 0x85.toByte()) {
+                                val id = desc[j + 1]
+                                if (id == 0x02.toByte() || id == 0x21.toByte() || id == 0x22.toByte()) { found = true; break }
+                                j += 2; continue
+                            }
+                            j += 1
                         }
-                        j += 1
+                        found
                     }
-                    found
-                }
-                FlutterLogger.d(TAG, "Iface idx=$i sub=${intf.interfaceSubclass} proto=${intf.interfaceProtocol} reportLen=${desc.size} has85=$has85 matchSpecific=$matchSpecific")
-                if (matchSpecific) {
-                    bestIface = intf
-                    hasSpecificIds = true
-                    break // strongest match
-                } else if (has85 && !hasSpecificIds && !hasAnyIds) {
-                    bestIface = intf
-                    hasAnyIds = true
-                } else if (!hasSpecificIds && !hasAnyIds && nonBootCandidate == intf && bestIface == null) {
-                    bestIface = intf
-                } else if (bestIface == null) {
-                    bestIface = intf // fallback to first HID seen
-                }
-            } else {
-                // No descriptor read; still consider non-boot as a fallback
-                if (!hasSpecificIds && !hasAnyIds && nonBootCandidate == intf && bestIface == null) {
-                    bestIface = intf
-                } else if (bestIface == null) {
-                    bestIface = intf
+                    FlutterLogger.d(TAG, "Iface idx=$i sub=${intf.interfaceSubclass} proto=${intf.interfaceProtocol} reportLen=${desc.size} has85=$has85 matchSpecific=$matchSpecific")
+                    if (matchSpecific) {
+                        bestIface = intf
+                        hasSpecificIds = true
+                        break // strongest match
+                    } else if (has85 && !hasSpecificIds && !hasAnyIds) {
+                        bestIface = intf
+                        hasAnyIds = true
+                    } else if (!hasSpecificIds && !hasAnyIds && nonBootCandidate == intf && bestIface == null) {
+                        bestIface = intf
+                    } else if (bestIface == null) {
+                        bestIface = intf // fallback to first HID seen
+                    }
+                } else {
+                    // No descriptor read; still consider non-boot as a fallback
+                    if (!hasSpecificIds && !hasAnyIds && nonBootCandidate == intf && bestIface == null) {
+                        bestIface = intf
+                    } else if (bestIface == null) {
+                        bestIface = intf
+                    }
                 }
             }
         }
 
-        if (bestIface == null && dev.interfaceCount > 0) {
-            bestIface = dev.getInterface(0)
+            if (bestIface == null && dev.interfaceCount > 0) {
+                bestIface = dev.getInterface(0)
+            }
+            val iface = bestIface ?: run { conn.close(); return null }
+            if (!conn.claimInterface(iface, true)) {
+                FlutterLogger.w(TAG, "ensureConnection($uuid) -> final claimInterface failed for chosen iface")
+                conn.close(); return null
+            }
+            var inEp: UsbEndpoint? = null
+            var outEp: UsbEndpoint? = null
+            for (e in 0 until iface.endpointCount) {
+                val ep = iface.getEndpoint(e)
+                val dirIn = ep.direction == UsbConstants.USB_DIR_IN
+                val dirOut = ep.direction == UsbConstants.USB_DIR_OUT
+                if (dirIn && inEp == null) inEp = ep
+                if (dirOut && outEp == null) outEp = ep
+            }
+            val dc = DeviceConn(dev, iface, conn, inEp, outEp)
+            FlutterLogger.d(TAG, "ensureConnection($uuid) -> chosen iface sub=${iface.interfaceSubclass} proto=${iface.interfaceProtocol} inEp=${inEp!=null} outEp=${outEp!=null}")
+            connections[uuid] = dc
+            dc
+        } finally {
+            logExit("ensureConnection")
         }
-        val iface = bestIface ?: run { conn.close(); return null }
-        if (!conn.claimInterface(iface, true)) {
-            FlutterLogger.w(TAG, "ensureConnection($uuid) -> final claimInterface failed for chosen iface")
-            conn.close(); return null
-        }
-        var inEp: UsbEndpoint? = null
-        var outEp: UsbEndpoint? = null
-        for (e in 0 until iface.endpointCount) {
-            val ep = iface.getEndpoint(e)
-            val dirIn = ep.direction == UsbConstants.USB_DIR_IN
-            val dirOut = ep.direction == UsbConstants.USB_DIR_OUT
-            if (dirIn && inEp == null) inEp = ep
-            if (dirOut && outEp == null) outEp = ep
-        }
-        val dc = DeviceConn(dev, iface, conn, inEp, outEp)
-        FlutterLogger.d(TAG, "ensureConnection($uuid) -> chosen iface sub=${iface.interfaceSubclass} proto=${iface.interfaceProtocol} inEp=${inEp!=null} outEp=${outEp!=null}")
-        connections[uuid] = dc
-        return dc
     }
 
     private fun tryGetProductName(dev: UsbDevice): String? {
-        // Product name typically needs opening an interface; keep simple for scaffold
-        return null
+        logEnter("tryGetProductName")
+        return try {
+            // Product name typically needs opening an interface; keep simple for scaffold
+            null
+        } finally {
+            logExit("tryGetProductName")
+        }
     }
 
     private fun parseFilters(json: String): List<Pair<Int?, Int?>> {
+        logEnter("parseFilters")
         return try {
             val arr = JSONArray(json)
             (0 until arr.length()).map { idx ->
@@ -653,18 +810,25 @@ object UsbHidBridge {
         } catch (t: Throwable) {
             Log.w(TAG, "Failed to parse filters: $t")
             emptyList()
+        } finally {
+            logExit("parseFilters")
         }
     }
 
     private fun toHex(bytes: ByteArray, maxShow: Int = 256): String {
-        if (bytes.isEmpty()) return ""
-        val sb = StringBuilder()
-        val limit = kotlin.math.min(bytes.size, maxShow)
-        for (i in 0 until limit) {
-            sb.append(String.format("%02X", bytes[i]))
-            if (i != limit - 1) sb.append(' ')
+        logEnter("toHex")
+        return try {
+            if (bytes.isEmpty()) return ""
+            val sb = StringBuilder()
+            val limit = kotlin.math.min(bytes.size, maxShow)
+            for (i in 0 until limit) {
+                sb.append(String.format("%02X", bytes[i]))
+                if (i != limit - 1) sb.append(' ')
+            }
+            if (bytes.size > limit) sb.append(" …(+").append(bytes.size - limit).append(")")
+            sb.toString()
+        } finally {
+            logExit("toHex")
         }
-        if (bytes.size > limit) sb.append(" …(+").append(bytes.size - limit).append(")")
-        return sb.toString()
     }
 }
