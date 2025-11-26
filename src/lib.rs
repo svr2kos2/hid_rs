@@ -10,6 +10,7 @@ mod platform_hid;
 #[path = "os_hid.rs"]
 mod platform_hid;
 
+pub mod logger;
 pub mod hid_error;
 pub mod hid_report_descriptor;
 
@@ -87,6 +88,7 @@ impl From<HidDevice> for u128 {
 }
 
 pub async fn init() -> Result<(), HidError> {
+    logger::init();
     match platform_hid::init().await {
         Ok(_) => {
             log::debug!("hid_api init success");
@@ -104,11 +106,29 @@ pub async fn is_supported() -> bool {
 }
 
 pub async fn request_device(vpid: Vec<(u16, Option<u16>)>) -> Result<Vec<u128>, HidError> {
-    platform_hid::request_device(vpid).await
+    match platform_hid::request_device(vpid).await {
+        Ok(ids) => {
+            log::debug!("request_device success: {:?}", ids);
+            Ok(ids)
+        },
+        Err(e) => {
+            log::error!("request_device failed: {:?}", e);
+            Err(e)
+        },
+    }
 }
 
 pub fn get_device_list() -> Result<Vec<HidDevice>, HidError> {
-    let devices = platform_hid::get_device_list()?;
+    let devices = match  platform_hid::get_device_list() {
+        Ok(devs) => {
+            log::debug!("get_device_list success: {} devices", devs.len());
+            devs
+        },
+        Err(e) => {
+            log::error!("get_device_list failed: {:?}", e);
+            return Err(e);
+        },
+    };
     Ok(devices.into_iter().map(HidDevice::from).collect())
 }
 

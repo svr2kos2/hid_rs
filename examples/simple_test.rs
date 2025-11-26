@@ -4,8 +4,8 @@ use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logging
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Initialize logging (cross-platform)
+    hid_rs::logger::init();
     log::info!("Starting HID Example");
 
     // Initialize HID subsystem

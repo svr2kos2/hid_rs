@@ -97,9 +97,9 @@ pub(in crate) async fn request_device(vendor_ids: Vec<(u16, Option<u16>)>) -> Re
         let jctx = ctx.as_obj();
         let jfilters_obj: JObject = jfilters.into();
         let args = vec![JValue::Object(&jctx), JValue::Object(&jfilters_obj)];
-    let gclass = load_bridge_class(&mut env, &ctx).map_err(|e| HidError::new(&e))?;
-    let local_class = env.new_local_ref(gclass.as_obj()).map_err(|e| HidError::new(&format!("new_local_ref(class): {e:?}")))?;
-    let jclass: JClass = JClass::from(local_class);
+        let gclass = load_bridge_class(&mut env, &ctx).map_err(|e| HidError::new(&e))?;
+        let local_class = env.new_local_ref(gclass.as_obj()).map_err(|e| HidError::new(&format!("new_local_ref(class): {e:?}")))?;
+        let jclass: JClass = JClass::from(local_class);
         let arr = env
             .call_static_method(
                 jclass,
@@ -444,7 +444,7 @@ pub(in crate) async fn send_report(uuid: u128, data: &mut Vec<u8>) -> Result<usi
                 report_id, size, data.len()
             )));
         }
-        let mut to_send: Vec<u8> = if data.len() < size {
+        let to_send: Vec<u8> = if data.len() < size {
             let mut v = vec![0u8; size];
             v[..data.len()].copy_from_slice(&data[..]);
             v
