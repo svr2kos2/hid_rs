@@ -1,4 +1,4 @@
-use hid_rs::{init, request_device, HidDevice, SafeCallback2};
+use hid_rs::{Hid, SafeCallback2};
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -9,7 +9,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Starting HID Example");
 
     // Initialize HID subsystem
-    init().await?;
+    Hid::init_hid().await?;
     log::info!("HID Initialized");
 
     // Define filters (empty for all devices, or specific VID/PID)
@@ -21,14 +21,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Setting device filters...");
     // On Desktop/Android, this sets the filter for the background scanner.
     // On Web, this would prompt the user to select a device.
-    let _ = request_device(filters).await?;
+    let _ = Hid::request_device(filters).await?;
 
     log::info!("Waiting for device scan...");
     // Give the background thread time to scan (Desktop implementation polls every 1s)
     sleep(Duration::from_secs(2)).await;
 
     log::info!("Getting device list...");
-    let devices = hid_rs::get_device_list()?;
+    let devices = hid_rs::Hid::get_device_list()?;
 
     if devices.is_empty() {
         log::warn!("No devices found!");

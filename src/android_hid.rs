@@ -338,9 +338,9 @@ pub(in crate) fn get_product_name(uuid: u128) -> Result<Option<String>, HidError
         let juuid = env.new_string(uuid::Uuid::from_u128(uuid).to_string()).map_err(|e| HidError::new(&format!("new_string: {e:?}")))?;
         let juuid_obj: JObject = juuid.into();
         let args = vec![JValue::Object(&juuid_obj)];
-    let gclass = load_bridge_class(&mut env, &ctx).map_err(|e| HidError::new(&e))?;
-    let local_class = env.new_local_ref(gclass.as_obj()).map_err(|e| HidError::new(&format!("new_local_ref(class): {e:?}")))?;
-    let jclass: JClass = JClass::from(local_class);
+        let gclass = load_bridge_class(&mut env, &ctx).map_err(|e| HidError::new(&e))?;
+        let local_class = env.new_local_ref(gclass.as_obj()).map_err(|e| HidError::new(&format!("new_local_ref(class): {e:?}")))?;
+        let jclass: JClass = JClass::from(local_class);
         let val = env
             .call_static_method(
                 jclass,

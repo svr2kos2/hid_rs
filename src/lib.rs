@@ -71,6 +71,64 @@ impl<T1, T2> SafeCallback2<T1, T2> {
     }
 }
 
+pub struct Hid {}
+    impl Hid {
+        pub async fn init_hid() -> Result<(), HidError> {
+        logger::init();
+        match platform_hid::init().await {
+            Ok(_) => {
+                log::debug!("hid_api init success");
+                Ok(())
+            },
+            Err(e) => {
+                log::debug!("hid_api init failed: {:?}", e);
+                Err(e)
+            },
+        }
+    }
+
+    pub async fn is_supported() -> bool {
+        platform_hid::is_supported()
+    }
+
+    pub async fn request_device(vpid: Vec<(u16, Option<u16>)>) -> Result<Vec<u128>, HidError> {
+        match platform_hid::request_device(vpid).await {
+            Ok(ids) => {
+                log::debug!("request_device success: {:?}", ids);
+                Ok(ids)
+            },
+            Err(e) => {
+                log::error!("request_device failed: {:?}", e);
+                Err(e)
+            },
+        }
+    }
+
+    pub fn get_device_list() -> Result<Vec<HidDevice>, HidError> {
+        let devices = match  platform_hid::get_device_list() {
+            Ok(devs) => {
+                log::debug!("get_device_list success: {} devices", devs.len());
+                devs
+            },
+            Err(e) => {
+                log::error!("get_device_list failed: {:?}", e);
+                return Err(e);
+            },
+        };
+        Ok(devices.into_iter().map(HidDevice::from).collect())
+    }
+
+    pub async fn sub_connection_changed(callback: SafeCallback2::<u128, bool>) -> Result<(), HidError> {
+        log::debug!("sub_connection_changed called in hid_api");
+        platform_hid::sub_connection_changed(callback).await
+    }
+
+    pub async fn unsub_connection_changed(callback: SafeCallback2::<u128, bool>) -> Result<(), HidError> {
+        platform_hid::unsub_connection_changed(callback).await
+    }
+
+}
+
 pub struct HidDevice {
     pub uuid: u128,
 }
@@ -85,60 +143,6 @@ impl From<HidDevice> for u128 {
     fn from(device: HidDevice) -> u128 {
         device.uuid
     }
-}
-
-pub async fn init() -> Result<(), HidError> {
-    logger::init();
-    match platform_hid::init().await {
-        Ok(_) => {
-            log::debug!("hid_api init success");
-            Ok(())
-        },
-        Err(e) => {
-            log::debug!("hid_api init failed: {:?}", e);
-            Err(e)
-        },
-    }
-}
-
-pub async fn is_supported() -> bool {
-    platform_hid::is_supported()
-}
-
-pub async fn request_device(vpid: Vec<(u16, Option<u16>)>) -> Result<Vec<u128>, HidError> {
-    match platform_hid::request_device(vpid).await {
-        Ok(ids) => {
-            log::debug!("request_device success: {:?}", ids);
-            Ok(ids)
-        },
-        Err(e) => {
-            log::error!("request_device failed: {:?}", e);
-            Err(e)
-        },
-    }
-}
-
-pub fn get_device_list() -> Result<Vec<HidDevice>, HidError> {
-    let devices = match  platform_hid::get_device_list() {
-        Ok(devs) => {
-            log::debug!("get_device_list success: {} devices", devs.len());
-            devs
-        },
-        Err(e) => {
-            log::error!("get_device_list failed: {:?}", e);
-            return Err(e);
-        },
-    };
-    Ok(devices.into_iter().map(HidDevice::from).collect())
-}
-
-pub async fn sub_connection_changed(callback: SafeCallback2::<u128, bool>) -> Result<(), HidError> {
-    log::debug!("sub_connection_changed called in hid_api");
-    platform_hid::sub_connection_changed(callback).await
-}
-
-pub async fn unsub_connection_changed(callback: SafeCallback2::<u128, bool>) -> Result<(), HidError> {
-    platform_hid::unsub_connection_changed(callback).await
 }
 
 impl HidDevice {
