@@ -20,23 +20,23 @@ use hid_report_descriptor::HidReportDescriptor;
 use futures::future::BoxFuture;
 
 #[derive(Clone)]
-pub struct SafeCallback<T> {
-    callback: Arc<dyn Fn(T) -> BoxFuture<'static, ()> + Send + Sync>,
+pub struct SafeCallback<T, R> {
+    callback: Arc<dyn Fn(T) -> BoxFuture<'static, R> + Send + Sync>,
 }
-
-impl<T> SafeCallback<T> {
+    
+impl<T, R> SafeCallback<T, R> {
     pub fn new<F>(f: F) -> Self 
-    where F: Fn(T) -> BoxFuture<'static, ()> + Send + Sync + 'static 
+    where F: Fn(T) -> BoxFuture<'static, R> + Send + Sync + 'static 
     {
         Self { callback: Arc::new(f) }
     }
 
-    pub async fn call(&self, arg: T) {
+    pub async fn call(&self, arg: T) -> R {
         (self.callback)(arg).await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn call_blocking(&self, arg: T) {
+    pub fn call_blocking(&self, arg: T) -> R {
         futures::executor::block_on((self.callback)(arg))
     }
 
@@ -46,23 +46,23 @@ impl<T> SafeCallback<T> {
 }
 
 #[derive(Clone)]
-pub struct SafeCallback2<T1, T2> {
-    callback: Arc<dyn Fn(T1, T2) -> BoxFuture<'static, ()> + Send + Sync>,
+pub struct SafeCallback2<T1, T2, R> {
+    callback: Arc<dyn Fn(T1, T2) -> BoxFuture<'static, R> + Send + Sync>,
 }
 
-impl<T1, T2> SafeCallback2<T1, T2> {
+impl<T1, T2, R> SafeCallback2<T1, T2, R> {
     pub fn new<F>(f: F) -> Self 
-    where F: Fn(T1, T2) -> BoxFuture<'static, ()> + Send + Sync + 'static 
+    where F: Fn(T1, T2) -> BoxFuture<'static, R> + Send + Sync + 'static 
     {
         Self { callback: Arc::new(f) }
     }
 
-    pub async fn call(&self, arg1: T1, arg2: T2) {
+    pub async fn call(&self, arg1: T1, arg2: T2) -> R {
         (self.callback)(arg1, arg2).await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn call_blocking(&self, arg1: T1, arg2: T2) {
+    pub fn call_blocking(&self, arg1: T1, arg2: T2) -> R {
         futures::executor::block_on((self.callback)(arg1, arg2))
     }
 
@@ -118,12 +118,12 @@ pub struct Hid {}
         Ok(devices.into_iter().map(HidDevice::from).collect())
     }
 
-    pub async fn sub_connection_changed(callback: SafeCallback2::<u128, bool>) -> Result<(), HidError> {
+    pub async fn sub_connection_changed(callback: SafeCallback2::<u128, bool, ()>) -> Result<(), HidError> {
         log::debug!("sub_connection_changed called in hid_api");
         platform_hid::sub_connection_changed(callback).await
     }
 
-    pub async fn unsub_connection_changed(callback: SafeCallback2::<u128, bool>) -> Result<(), HidError> {
+    pub async fn unsub_connection_changed(callback: SafeCallback2::<u128, bool, ()>) -> Result<(), HidError> {
         platform_hid::unsub_connection_changed(callback).await
     }
 
@@ -192,7 +192,7 @@ impl HidDevice {
 
     pub async fn send_firmware(&self, firmware: Vec<u8>, 
         write_data_cmd: u8, size_addr: u8, big_endian: u8, err_for_size: u8, encrypt: u8, check_sum: u8,
-        on_progress: SafeCallback<f64>) -> Result<usize, HidError> {
+        on_progress: SafeCallback<f64, ()>) -> Result<usize, HidError> {
         let mut buffer = firmware;
         platform_hid::send_firmware(
             self.uuid, 
@@ -207,11 +207,11 @@ impl HidDevice {
         ).await
     }
 
-    pub async fn add_report_listener(&self, callback: &SafeCallback2::<u128, Vec<u8>>) -> Result<(), HidError> {
+    pub async fn add_report_listener(&self, callback: &SafeCallback2::<u128, Vec<u8>, ()>) -> Result<(), HidError> {
         platform_hid::sub_report_arrive(self.uuid, callback.clone()).await
     }
 
-    pub async fn remove_report_listener(&self, callback: &SafeCallback2::<u128, Vec<u8>>) -> Result<(), HidError> {
+    pub async fn remove_report_listener(&self, callback: &SafeCallback2::<u128, Vec<u8>, ()>) -> Result<(), HidError> {
         platform_hid::unsub_report_arrive(self.uuid, callback.clone()).await
     }
 

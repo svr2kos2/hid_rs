@@ -1,6 +1,17 @@
-use hid_rs::{Hid, SafeCallback2};
-use std::time::Duration;
+use hid_rs::{Hid, HidDevice, SafeCallback2};
+use std::{future::Future, pin::Pin, sync::LazyLock, time::Duration};
 use tokio::time::sleep;
+
+static HID_DEVICE_EVENT_HANDLER: LazyLock<SafeCallback2<u128, Vec<u8>, ()>> =
+    LazyLock::new(|| SafeCallback2::<u128, Vec<u8>, ()>::new(move |uuid, data| {
+        Box::pin(async move {
+            println!(
+                "Received report from device {:?}, Data: {:?}",
+                uuid,
+                data
+            );
+        }) as Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+    }));
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -12,50 +23,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Hid::init_hid().await?;
     log::info!("HID Initialized");
 
-    // Define filters (empty for all devices, or specific VID/PID)
-    // Example: SayoDevice VID=0x8089
-    let filters = vec![
-        (0x8089, None), // SayoDevice
-    ];
+    hid_rs::Hid::sub_connection_changed(SafeCallback2::<u128, bool, ()>::new(|uuid, event_type| {
+        Box::pin(async move {
+            println!(
+                "Device connection changed: {:?}, Type: {:?}",
+                uuid,
+                event_type
+            );
+            let device = HidDevice::from(uuid);
+            match event_type {
+                true => {
+                    if let Err(err) = device.add_report_listener(&HID_DEVICE_EVENT_HANDLER).await {
+                        eprintln!("Failed to add report listener for {uuid:?}: {err:?}");
+                        return;
+                    }
+                }
+                false => {
+                    if let Err(err) = device.remove_report_listener(&HID_DEVICE_EVENT_HANDLER).await {
+                        eprintln!("Failed to remove report listener for {uuid:?}: {err:?}");
+                    }
+                }
+            }
+        }) as Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+    })).await?;
 
-    log::info!("Setting device filters...");
-    // On Desktop/Android, this sets the filter for the background scanner.
-    // On Web, this would prompt the user to select a device.
-    let _ = Hid::request_device(filters).await?;
-
-    log::info!("Waiting for device scan...");
-    // Give the background thread time to scan (Desktop implementation polls every 1s)
-    sleep(Duration::from_secs(2)).await;
-
-    log::info!("Getting device list...");
-    let devices = hid_rs::Hid::get_device_list()?;
-
-    if devices.is_empty() {
-        log::warn!("No devices found!");
-        return Ok(());
-    }
-
-    for device in devices {
-        let vid = device.vid()?;
-        let pid = device.pid()?;
-        let name = device.get_product_name()?.unwrap_or_default();
-        
-        log::info!("Found Device: {} (VID: {:04X}, PID: {:04X})", name, vid, pid);
-
-        // Example: Listen for reports
-        let callback = SafeCallback2::new(|_uuid, data| Box::pin(async move {
-            log::info!("Received report: {:02X?}", data);
-        }));
-
-        log::info!("Subscribing to report events...");
-        device.add_report_listener(&callback).await?;
-
-        // Keep alive for a bit to receive events
-        sleep(Duration::from_secs(5)).await;
-
-        log::info!("Unsubscribing...");
-        device.remove_report_listener(&callback).await?;
-    }
-
+    // wait 100 seconds to receive events
+    sleep(Duration::from_secs(100)).await;
     Ok(())
 }

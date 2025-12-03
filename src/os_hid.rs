@@ -119,7 +119,7 @@ pub(in crate) fn get_device_list() -> Result<Vec<u128>, HidError> {
     Ok(list)
 }
 
-pub(in crate) async fn sub_connection_changed(callback: SafeCallback2<u128, bool>) -> Result<(), HidError> {
+pub(in crate) async fn sub_connection_changed(callback: SafeCallback2<u128, bool, ()>) -> Result<(), HidError> {
     let uuids = {
         let device_list_binding = DEVICE_LIST.read()
             .map_err(|_| HidError::new("Failed to acquire device list lock"))?;
@@ -136,7 +136,7 @@ pub(in crate) async fn sub_connection_changed(callback: SafeCallback2<u128, bool
     listeners_binding.push(callback);
     Ok(())
 }
-pub(in crate) async fn unsub_connection_changed(callback: SafeCallback2<u128, bool>) -> Result<(), HidError> {
+pub(in crate) async fn unsub_connection_changed(callback: SafeCallback2<u128, bool, ()>) -> Result<(), HidError> {
     let uuids = {
         let device_list_binding = DEVICE_LIST.read()
             .map_err(|_| HidError::new("Failed to acquire device list lock"))?;
@@ -237,12 +237,12 @@ pub(in crate) async fn send_report(uuid: u128, data: &mut Vec<u8>) -> Result<usi
 
 pub(in crate) async fn send_firmware(_uuid: u128, _firmware: &mut Vec<u8>, 
     _write_data_cmd:u8, _size_addr: u8, _big_endian: u8, _err_for_size: u8, _encrypt: u8, _check_sum: u8,
-    _on_progress: SafeCallback<f64>) -> Result<usize, HidError> {
+    _on_progress: SafeCallback<f64, ()>) -> Result<usize, HidError> {
     log::debug!("Send firmware intended for quick firmware transfer on web. This is not supposed to be called on desktop");
     Ok(0)
 }
 
-pub(in crate) async fn sub_report_arrive(handle: u128, callback: SafeCallback2<u128, Vec<u8>>) -> Result<(), HidError> {
+pub(in crate) async fn sub_report_arrive(handle: u128, callback: SafeCallback2<u128, Vec<u8>, ()>) -> Result<(), HidError> {
     let mut listeners_binding = DEVICE_REPORT_LISTENERS.write()
         .map_err(|_| HidError::new("Failed to acquire report listener lock"))?;
     
@@ -250,7 +250,7 @@ pub(in crate) async fn sub_report_arrive(handle: u128, callback: SafeCallback2<u
     listeners.push(callback);
     Ok(())
 }
-pub(in crate) async fn unsub_report_arrive(handle: u128, callback: SafeCallback2<u128, Vec<u8>>) -> Result<(), HidError> {
+pub(in crate) async fn unsub_report_arrive(handle: u128, callback: SafeCallback2<u128, Vec<u8>, ()>) -> Result<(), HidError> {
     let mut listeners_binding = DEVICE_REPORT_LISTENERS.write()
         .map_err(|_| HidError::new("Failed to acquire report listener lock"))?;
     
@@ -272,9 +272,9 @@ static DEVICE_LIST: Lazy<RwLock<HashMap<u128, Mutex<HidDevicePackage>>>>
     = Lazy::new(|| RwLock::new(HashMap::new()));
 static SERIAL_NUMBER_TO_UUID: Lazy<RwLock<HashMap<String, u128>>>
     = Lazy::new(|| RwLock::new(HashMap::new()));
-static DEVICE_CONNECTION_LISTENERS: Lazy<RwLock<Vec<SafeCallback2<u128, bool>>>>
+static DEVICE_CONNECTION_LISTENERS: Lazy<RwLock<Vec<SafeCallback2<u128, bool, ()>>>>
     = Lazy::new(|| RwLock::new(Vec::new()));
-static DEVICE_REPORT_LISTENERS: Lazy<RwLock<HashMap<u128, Vec<SafeCallback2<u128, Vec<u8>>>>>>
+static DEVICE_REPORT_LISTENERS: Lazy<RwLock<HashMap<u128, Vec<SafeCallback2<u128, Vec<u8>, ()>>>>>
     = Lazy::new(|| RwLock::new(HashMap::new()));
 
 ////////////////////////////////////////
