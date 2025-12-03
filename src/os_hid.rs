@@ -79,24 +79,22 @@ pub(in crate) async fn init() -> Result<(), HidError> {
     HIDAPI.lock()
         .map_err(|_| HidError::new("Failed to acquire HIDAPI lock"))?
         .replace(api);
+
+    fn poll_devices() -> Result<(), HidError> {
+        let vpids = VID_PID_LIST.lock()
+            .map_err(|_| HidError::new("Failed to acquire VID_PID_LIST lock"))?;
+        let converted_vpids: Vec<(u16, u16)> = vpids.iter()
+            .map(|(vid, pid)| (*vid, pid.unwrap_or(0)))
+            .collect();
+        drop(vpids);
+        update_device_list(converted_vpids)
+    }
     
+    poll_devices()?;
     std::thread::spawn(move || {
         loop {
-            let vpids = match VID_PID_LIST.lock() {
-                Ok(lock) => lock.clone(),
-                Err(_) => {
-                    log::debug!("Failed to acquire VID_PID_LIST lock");
-                    std::thread::sleep(std::time::Duration::from_millis(DEVICE_POLL_INTERVAL_MS));
-                    continue;
-                }
-            };
-            
-            let converted_vpids: Vec<(u16, u16)> = vpids.iter()
-                .map(|(vid, pid)| (*vid, pid.unwrap_or(0)))
-                .collect();
-                
-            if let Err(e) = update_device_list(converted_vpids) {
-                log::debug!("Failed to update device list: {}", e);
+            if let Err(e) = poll_devices() {
+                log::debug!("Device polling error: {:?}", e);
             }
             
             std::thread::sleep(std::time::Duration::from_millis(DEVICE_POLL_INTERVAL_MS));

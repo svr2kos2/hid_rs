@@ -133,6 +133,12 @@ pub struct HidDevice {
     pub uuid: u128,
 }
 
+impl PartialEq for HidDevice {
+    fn eq(&self, other: &Self) -> bool {
+        self.uuid == other.uuid
+    }
+}
+
 impl From<u128> for HidDevice {
     fn from(uuid: u128) -> Self {
         HidDevice { uuid }
