@@ -1,4 +1,3 @@
-use log::LevelFilter;
 
 /// Initialize the logger for the current platform.
 /// 
@@ -9,6 +8,7 @@ use log::LevelFilter;
 pub fn init() {
     #[cfg(target_os = "android")]
     {
+        use log::LevelFilter;
         android_logger::init_once(
             android_logger::Config::default()
                 .with_max_level(LevelFilter::Info)
@@ -18,6 +18,7 @@ pub fn init() {
 
     #[cfg(target_os = "ios")]
     {
+        use log::LevelFilter;
         let _ = oslog::OsLogger::new("com.rust.hid")
             .level_filter(LevelFilter::Info)
             .init();
@@ -25,6 +26,7 @@ pub fn init() {
 
     #[cfg(target_arch = "wasm32")]
     {
+        use log::LevelFilter;
         let _ = console_log::init_with_level(LevelFilter::Info);
     }
 

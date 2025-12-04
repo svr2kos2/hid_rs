@@ -15,9 +15,12 @@ pub mod hid_error;
 pub mod hid_report_descriptor;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use hid_error::HidError;
 use hid_report_descriptor::HidReportDescriptor;
 use futures::future::BoxFuture;
+
+static HID_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
 pub struct SafeCallback<T, R> {
@@ -74,9 +77,16 @@ impl<T1, T2, R> SafeCallback2<T1, T2, R> {
 pub struct Hid {}
     impl Hid {
         pub async fn init_hid() -> Result<(), HidError> {
+        // 检查是否已经初始化
+        if HID_INITIALIZED.load(Ordering::Acquire) {
+            log::debug!("hid_api already initialized, skipping");
+            return Ok(());
+        }
+        
         logger::init();
         match platform_hid::init().await {
             Ok(_) => {
+                HID_INITIALIZED.store(true, Ordering::Release);
                 log::debug!("hid_api init success");
                 Ok(())
             },
