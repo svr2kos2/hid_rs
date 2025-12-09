@@ -26,6 +26,14 @@ static HID_INITIALIZED: AtomicBool = AtomicBool::new(false);
 pub struct SafeCallback<T, R> {
     callback: Arc<dyn Fn(T) -> BoxFuture<'static, R> + Send + Sync>,
 }
+
+impl<T, R> std::fmt::Debug for SafeCallback<T, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SafeCallback")
+            .field("callback", &"<callback>")
+            .finish()
+    }
+}
     
 impl<T, R> SafeCallback<T, R> {
     pub fn new<F>(f: F) -> Self 
@@ -51,6 +59,14 @@ impl<T, R> SafeCallback<T, R> {
 #[derive(Clone)]
 pub struct SafeCallback2<T1, T2, R> {
     callback: Arc<dyn Fn(T1, T2) -> BoxFuture<'static, R> + Send + Sync>,
+}
+
+impl<T1, T2, R> std::fmt::Debug for SafeCallback2<T1, T2, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SafeCallback2")
+            .field("callback", &"<callback>")
+            .finish()
+    }
 }
 
 impl<T1, T2, R> SafeCallback2<T1, T2, R> {
