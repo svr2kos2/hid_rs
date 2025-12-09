@@ -48,7 +48,7 @@ impl<T, R> SafeCallback<T, R> {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn call_blocking(&self, arg: T) -> R {
-        futures::executor::block_on((self.callback)(arg))
+        pollster::block_on((self.callback)(arg))
     }
 
     pub fn ptr_eq(&self, other: &Self) -> bool {
@@ -82,7 +82,7 @@ impl<T1, T2, R> SafeCallback2<T1, T2, R> {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn call_blocking(&self, arg1: T1, arg2: T2) -> R {
-        futures::executor::block_on((self.callback)(arg1, arg2))
+        pollster::block_on((self.callback)(arg1, arg2))
     }
 
     pub fn ptr_eq(&self, other: &Self) -> bool {
