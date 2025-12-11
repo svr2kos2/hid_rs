@@ -193,18 +193,18 @@ pub(in crate) async fn send_report(uuid: u128, data: &mut Vec<u8>) -> Result<usi
         .map_err(|_| HidError::new("Failed to acquire device list lock"))?;
     
     let device_pack = device_list_binding.get(&uuid)
-        .ok_or_else(|| HidError::new("Device not found"))?;
+        .ok_or_else(|| HidError::new(&format!("Device not found - send report - uuid :{}", uuid)))?;
     
     let (device, size) = {
         let pack = device_pack.lock()
             .map_err(|_| HidError::new("Failed to acquire device lock"))?;
         
         let device = pack.devices.get(&report_id)
-            .ok_or_else(|| HidError::new("Report id not found"))?
+            .ok_or_else(|| HidError::new(&format!("Report id not found: {} - send report - uuid :{}", report_id, uuid)))?
             .clone();
         
         let size = pack.report_info.get(&report_id)
-            .ok_or_else(|| HidError::new("Report info not found"))?
+            .ok_or_else(|| HidError::new(&format!("Report info not found - send report - uuid :{}", uuid)))?
             .size;
         
         (device, size)
