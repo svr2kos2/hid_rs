@@ -201,7 +201,7 @@ pub(in crate) fn get_device_list() -> Result<Vec<u128>, HidError> {
     Ok(list)
 }
 
-pub(in crate) async fn sub_connection_changed(callback: SafeCallback2<u128, bool>) -> Result<(), HidError> {
+pub(in crate) async fn sub_connection_changed(callback: SafeCallback2<u128, bool, ()>) -> Result<(), HidError> {
     log::debug!("sub_connection_changed");
     let uuids: Vec<u128> = DEVICE_LIST.with(|list| {
         list.borrow().iter().map(|(uuid, _)| *uuid).collect()
@@ -215,7 +215,7 @@ pub(in crate) async fn sub_connection_changed(callback: SafeCallback2<u128, bool
     Ok(())
 }
 
-pub(in crate) async fn unsub_connection_changed(callback: SafeCallback2<u128, bool>) -> Result<(), HidError> {
+pub(in crate) async fn unsub_connection_changed(callback: SafeCallback2<u128, bool, ()>) -> Result<(), HidError> {
     let uuids: Vec<u128> = DEVICE_LIST.with(|list| {
         list.borrow().keys().map(|k| *k).collect()
     });
@@ -307,7 +307,7 @@ pub async fn send_firmware_progress(progress: JsValue) -> Promise {
 const JS_CODE: &str = include_str!("send_firmware.js");
 pub(in crate) async fn send_firmware(uuid: u128, firmware: &mut Vec<u8>, 
     write_data_cmd:u8, size_addr: u8, big_endian: u8, err_for_size: u8, encrypt: u8, check_sum: u8,
-    on_progress: SafeCallback<f64>) -> Result<usize, HidError> {
+    on_progress: SafeCallback<f64, ()>) -> Result<usize, HidError> {
     
     SEND_FIRMWARE_PROGRESS.with(|progress| {
         progress.borrow_mut().clear();
@@ -372,7 +372,7 @@ pub(in crate) async fn send_firmware(uuid: u128, firmware: &mut Vec<u8>,
     res
 }
 
-pub(in crate) async fn sub_report_arrive(uuid: u128, callback: SafeCallback2<u128, Vec<u8>>) -> Result<(), HidError> {
+pub(in crate) async fn sub_report_arrive(uuid: u128, callback: SafeCallback2<u128, Vec<u8>, ()>) -> Result<(), HidError> {
     DEVICE_REPORT_LISTENERS.with(|listeners| {
         let mut binding = listeners.borrow_mut();
         match binding.get_mut(&uuid) {
@@ -385,7 +385,7 @@ pub(in crate) async fn sub_report_arrive(uuid: u128, callback: SafeCallback2<u12
     Ok(())
 }
 
-pub(in crate) async fn unsub_report_arrive(uuid: u128, callback: SafeCallback2<u128, Vec<u8>>) -> Result<(), HidError> {
+pub(in crate) async fn unsub_report_arrive(uuid: u128, callback: SafeCallback2<u128, Vec<u8>, ()>) -> Result<(), HidError> {
     DEVICE_REPORT_LISTENERS.with(|listeners| {
         match listeners.borrow_mut().get_mut(&uuid) {
             Some(list) => list.retain(|l| !l.ptr_eq(&callback)),
@@ -399,10 +399,10 @@ pub(in crate) async fn unsub_report_arrive(uuid: u128, callback: SafeCallback2<u
 // Global variables
 ////////////////////////////////////////
 thread_local! {
-    static SEND_FIRMWARE_PROGRESS: RefCell<Vec<SafeCallback<f64>>> = RefCell::new(Vec::new());
+    static SEND_FIRMWARE_PROGRESS: RefCell<Vec<SafeCallback<f64, ()>>> = RefCell::new(Vec::new());
     static DEVICE_LIST: RefCell<HashMap<u128, HidDevicePackage>> = RefCell::new(HashMap::new());
-    static DEVICE_CONNECTION_LISTENERS: RefCell<Vec<SafeCallback2<u128, bool>>> = RefCell::new(Vec::new());
-    static DEVICE_REPORT_LISTENERS: RefCell<HashMap<u128, Vec<SafeCallback2<u128, Vec<u8>>>>> = RefCell::new(HashMap::new());
+    static DEVICE_CONNECTION_LISTENERS: RefCell<Vec<SafeCallback2<u128, bool, ()>>> = RefCell::new(Vec::new());
+    static DEVICE_REPORT_LISTENERS: RefCell<HashMap<u128, Vec<SafeCallback2<u128, Vec<u8>, ()>>>> = RefCell::new(HashMap::new());
 }
 
 ////////////////////////////////////////

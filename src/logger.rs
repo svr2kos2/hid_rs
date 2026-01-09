@@ -26,8 +26,7 @@ pub fn init() {
 
     #[cfg(target_arch = "wasm32")]
     {
-        use log::LevelFilter;
-        let _ = console_log::init_with_level(LevelFilter::Info);
+        let _ = console_log::init_with_level(log::Level::Info);
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
