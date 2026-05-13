@@ -462,9 +462,9 @@ impl HidDevicePackage {
                 };
 
                 // Hand off to the per-device dispatcher; never block the reader.
+                let new_depth = crate::increment_queue_depth(queue_depth.as_ref());
                 match tx.try_send(shared) {
                     Ok(()) => {
-                        let new_depth = queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
                         if new_depth >= REPORT_QUEUE_WARN_THRESHOLD
                             && !queue_warned.swap(true, Ordering::Relaxed)
                         {
@@ -475,6 +475,7 @@ impl HidDevicePackage {
                         }
                     }
                     Err(TrySendError::Full(_)) => {
+                        crate::decrement_queue_depth(queue_depth.as_ref());
                         // Capacity reached; drop the newest packet to keep
                         // the reader running. The high-water warning above
                         // already fired (or is being suppressed).
@@ -485,6 +486,7 @@ impl HidDevicePackage {
                         );
                     }
                     Err(TrySendError::Disconnected(_)) => {
+                        crate::decrement_queue_depth(queue_depth.as_ref());
                         log::debug!("dispatcher gone for device {:032x}, reader exiting", uuid);
                         break;
                     }
@@ -705,8 +707,8 @@ fn update_device_list(vendor_ids: Vec<(u16, u16)>) -> Result<(), HidError> {
                     std::thread::spawn(move || {
                         log::debug!("dispatcher thread running for device {uuid:032x}");
                         while let Ok(shared) = rx.recv() {
-                            let prev = queue_depth.fetch_sub(1, Ordering::Relaxed);
-                            if prev <= REPORT_QUEUE_WARN_THRESHOLD {
+                            let remaining_depth = crate::decrement_queue_depth(queue_depth.as_ref());
+                            if remaining_depth < REPORT_QUEUE_WARN_THRESHOLD {
                                 queue_warned.store(false, Ordering::Relaxed);
                             }
                             notify_report_arrive(uuid, shared);

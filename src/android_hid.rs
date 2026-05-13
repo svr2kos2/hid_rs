@@ -695,8 +695,8 @@ pub(crate) fn register_report_listener(
         std::thread::spawn(move || {
             log::debug!("dispatcher thread running for device {uuid:032x}");
             while let Ok(shared) = rx.recv() {
-                let prev = dispatch_depth.fetch_sub(1, Ordering::Relaxed);
-                if prev <= REPORT_QUEUE_WARN_THRESHOLD {
+                let remaining_depth = crate::decrement_queue_depth(dispatch_depth.as_ref());
+                if remaining_depth < REPORT_QUEUE_WARN_THRESHOLD {
                     dispatch_warned.store(false, Ordering::Relaxed);
                 }
                 notify_report_arrive(uuid, shared);
@@ -798,13 +798,11 @@ pub(crate) fn register_report_listener(
                                                     if !bytes.is_empty() {
                                                         let shared: Arc<[u8]> =
                                                             Arc::from(bytes.into_boxed_slice());
+                                                        let new_depth = crate::increment_queue_depth(
+                                                            reader_depth.as_ref(),
+                                                        );
                                                         match reader_tx.try_send(shared) {
                                                             Ok(()) => {
-                                                                let new_depth =
-                                                                    reader_depth.fetch_add(
-                                                                        1,
-                                                                        Ordering::Relaxed,
-                                                                    ) + 1;
                                                                 if new_depth
                                                                     >= REPORT_QUEUE_WARN_THRESHOLD
                                                                     && !reader_warned.swap(
@@ -821,6 +819,9 @@ pub(crate) fn register_report_listener(
                                                                 }
                                                             }
                                                             Err(TrySendError::Full(_)) => {
+                                                                crate::decrement_queue_depth(
+                                                                    reader_depth.as_ref(),
+                                                                );
                                                                 log::warn!(
                                                                     "report queue for {:?} full ({} cap), dropping packet",
                                                                     uuid::Uuid::from_u128(uuid),
@@ -828,6 +829,9 @@ pub(crate) fn register_report_listener(
                                                                 );
                                                             }
                                                             Err(TrySendError::Disconnected(_)) => {
+                                                                crate::decrement_queue_depth(
+                                                                    reader_depth.as_ref(),
+                                                                );
                                                                 log::debug!(
                                                                     "report channel for {:?} disconnected; reader exiting",
                                                                     uuid::Uuid::from_u128(uuid)

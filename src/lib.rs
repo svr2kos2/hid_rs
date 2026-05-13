@@ -18,7 +18,7 @@ use hid_error::HidError;
 use hid_report_descriptor::HidReportDescriptor;
 use once_cell::sync::Lazy;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -62,6 +62,39 @@ pub(crate) fn evaluate_device_filter(desc: &HidReportDescriptor) -> bool {
     match DEVICE_FILTER.read() {
         Ok(slot) => slot.as_ref().is_none_or(|f| f(desc)),
         Err(_) => true,
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Internal queue-depth bookkeeping helpers
+////////////////////////////////////////////////////////////////////////////////
+
+/// Increment a queue-depth counter before publishing work to another thread.
+///
+/// Callers should roll the increment back with [`decrement_queue_depth`] if the
+/// enqueue operation fails.
+pub(crate) fn increment_queue_depth(depth: &AtomicUsize) -> usize {
+    depth.fetch_add(1, Ordering::Relaxed).saturating_add(1)
+}
+
+/// Decrement a queue-depth counter without allowing `usize` underflow.
+/// Returns the new depth after the decrement (or `0` if it was already zero).
+pub(crate) fn decrement_queue_depth(depth: &AtomicUsize) -> usize {
+    let mut current = depth.load(Ordering::Relaxed);
+    loop {
+        if current == 0 {
+            return 0;
+        }
+
+        match depth.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return current - 1,
+            Err(actual) => current = actual,
+        }
     }
 }
 
@@ -414,5 +447,39 @@ impl HidDevice {
 
     pub fn has_report_id(&self, report_id: u8) -> Result<bool, HidError> {
         platform_hid::has_report_id(self.id.as_u128(), report_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decrement_queue_depth, increment_queue_depth};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn queue_depth_increment_and_decrement_round_trip() {
+        let depth = AtomicUsize::new(0);
+
+        assert_eq!(increment_queue_depth(&depth), 1);
+        assert_eq!(depth.load(Ordering::Relaxed), 1);
+
+        assert_eq!(decrement_queue_depth(&depth), 0);
+        assert_eq!(depth.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn queue_depth_decrement_at_zero_does_not_underflow() {
+        let depth = AtomicUsize::new(0);
+
+        assert_eq!(decrement_queue_depth(&depth), 0);
+        assert_eq!(depth.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn queue_depth_rollback_restores_previous_value() {
+        let depth = AtomicUsize::new(0);
+
+        assert_eq!(increment_queue_depth(&depth), 1);
+        assert_eq!(decrement_queue_depth(&depth), 0);
+        assert_eq!(depth.load(Ordering::Relaxed), 0);
     }
 }
