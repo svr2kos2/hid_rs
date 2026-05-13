@@ -1,55 +1,54 @@
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
 use hidreport::*;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct HidReportInfo {
     pub report_id: u8,
     pub size: usize,
     pub usages: Vec<u32>,
 }
 
-impl Clone for HidReportInfo {
-    fn clone(&self) -> Self {
-        HidReportInfo {
-            report_id: self.report_id,
-            size: self.size,
-            usages: self.usages.clone(),
-        }
-    }
-}
-
 impl HidReportInfo {
     #[cfg(target_arch = "wasm32")]
     fn from_js_value(value: JsValue) -> Option<Self> {
         use std::cmp::max;
-        let report_id = match js_sys::Reflect::get(
-            &value, &JsValue::from_str("reportId")) {
+        let report_id = match js_sys::Reflect::get(&value, &JsValue::from_str("reportId")) {
             Ok(id) => id.as_f64().expect("Can not get report id in from_js_value") as u8,
             Err(_) => return None,
         };
 
         let mut usages_res: Vec<u32> = Vec::new();
 
-        let items = js_sys::Reflect::get(&value, &JsValue::from_str("items")).expect("Can not get items in HidReportInfo::from_js_value");
+        let items = js_sys::Reflect::get(&value, &JsValue::from_str("items"))
+            .expect("Can not get items in HidReportInfo::from_js_value");
         let mut report_size = 31;
         for item in js_sys::Array::from(&items).iter() {
-
             let size = match js_sys::Reflect::get(&item, &JsValue::from_str("reportSize")) {
-                Ok(val) => val.as_f64().expect("Can not get reportSize in HidReportInfo::from_js_value") as u16,
+                Ok(val) => val
+                    .as_f64()
+                    .expect("Can not get reportSize in HidReportInfo::from_js_value")
+                    as u16,
                 Err(_) => continue,
             };
 
             let count = match js_sys::Reflect::get(&item, &JsValue::from_str("reportCount")) {
-                Ok(val) => val.as_f64().expect("Can not get reportCount in HidReportInfo::from_js_value") as u16,
+                Ok(val) => val
+                    .as_f64()
+                    .expect("Can not get reportCount in HidReportInfo::from_js_value")
+                    as u16,
                 Err(_) => continue,
             };
 
-            report_size = max(report_size,  count * match size % 8 {
-                0 => size / 8,
-                _ => size / 8 + 1,
-            });
+            report_size = max(
+                report_size,
+                count
+                    * match size % 8 {
+                        0 => size / 8,
+                        _ => size / 8 + 1,
+                    },
+            );
 
             match js_sys::Reflect::get(&item, &JsValue::from_str("usages")) {
                 Ok(usages) => {
@@ -63,7 +62,7 @@ impl HidReportInfo {
                         };
                         usages_res.push(usg);
                     }
-                },
+                }
                 Err(_) => continue,
             }
         }
@@ -103,11 +102,11 @@ impl HidReportInfo {
                     usages.push(usage.into());
                 }
             }
-        };
+        }
         Some(HidReportInfo {
-            report_id: report_id,
-            size: size,
-            usages: usages,
+            report_id,
+            size,
+            usages,
         })
     }
 
@@ -126,14 +125,14 @@ impl HidReportInfo {
                     usages.push(usage.into());
                 }
             }
-        };
+        }
         Some(HidReportInfo {
             report_id: report_id,
             size: size,
             usages: usages,
         })
     }
-    
+
     #[cfg(not(target_arch = "wasm32"))]
     fn from_array(array: &[impl Report]) -> Vec<Self> {
         let mut vec = Vec::new();
@@ -145,24 +144,18 @@ impl HidReportInfo {
         }
         vec
     }
-
-
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct HidReportDescriptor {
     pub input_reports: Vec<HidReportInfo>,
     pub output_reports: Vec<HidReportInfo>,
     pub feature_reports: Vec<HidReportInfo>,
 }
 
-impl Clone for HidReportDescriptor {
-    fn clone(&self) -> Self {
-        HidReportDescriptor {
-            input_reports: self.input_reports.clone(),
-            output_reports: self.output_reports.clone(),
-            feature_reports: self.feature_reports.clone(),
-        }
+impl Default for HidReportDescriptor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -177,16 +170,17 @@ impl HidReportDescriptor {
 
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn from_js_value(collection: JsValue) -> Option<Self> {
-        let input_reports = js_sys::Reflect::get(
-            &collection, &JsValue::from_str("inputReports")).expect("Can not get inputReports in HidReportDescriptor::from_js_value");
-        let output_reports = js_sys::Reflect::get(
-            &collection, &JsValue::from_str("outputReports")).expect("Can not get outputReports in HidReportDescriptor::from_js_value");
-        let feature_reports = js_sys::Reflect::get(
-            &collection, &JsValue::from_str("featureReports")).expect("Can not get featureReports in HidReportDescriptor::from_js_value");
+        let input_reports = js_sys::Reflect::get(&collection, &JsValue::from_str("inputReports"))
+            .expect("Can not get inputReports in HidReportDescriptor::from_js_value");
+        let output_reports = js_sys::Reflect::get(&collection, &JsValue::from_str("outputReports"))
+            .expect("Can not get outputReports in HidReportDescriptor::from_js_value");
+        let feature_reports =
+            js_sys::Reflect::get(&collection, &JsValue::from_str("featureReports"))
+                .expect("Can not get featureReports in HidReportDescriptor::from_js_value");
 
         let input_reports = HidReportInfo::from_array(&js_sys::Array::from(&input_reports));
-        let output_reports =HidReportInfo::from_array(&js_sys::Array::from(&output_reports));
-        let feature_reports =HidReportInfo::from_array(&js_sys::Array::from(&feature_reports));
+        let output_reports = HidReportInfo::from_array(&js_sys::Array::from(&output_reports));
+        let feature_reports = HidReportInfo::from_array(&js_sys::Array::from(&feature_reports));
 
         if input_reports.len() == 0 && output_reports.len() == 0 && feature_reports.len() == 0 {
             return None;
@@ -206,11 +200,65 @@ impl HidReportDescriptor {
         let feature_reports = report.feature_reports();
 
         HidReportDescriptor {
-            input_reports: HidReportInfo::from_array(&input_reports),
-            output_reports: HidReportInfo::from_array(&output_reports),
-            feature_reports: HidReportInfo::from_array(&feature_reports),
+            input_reports: HidReportInfo::from_array(input_reports),
+            output_reports: HidReportInfo::from_array(output_reports),
+            feature_reports: HidReportInfo::from_array(feature_reports),
         }
-        
     }
+}
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::HidReportDescriptor;
+    use hidreport::ReportDescriptor;
+
+    #[test]
+    fn from_hid_report_collects_input_output_and_feature_reports() {
+        let bytes = [
+            0x06, 0x00, 0xff, // Usage Page (Vendor Defined)
+            0x09, 0x01, // Usage
+            0xa1, 0x01, // Collection (Application)
+            0x85, 0x02, //   Report ID (2)
+            0x75, 0x08, //   Report Size (8)
+            0x95, 0x40, //   Report Count (64)
+            0x09, 0x01, //   Usage
+            0x81, 0x02, //   Input (Data,Var,Abs)
+            0x85, 0x21, //   Report ID (33)
+            0x75, 0x08, //   Report Size (8)
+            0x95, 0x20, //   Report Count (32)
+            0x09, 0x02, //   Usage
+            0x91, 0x02, //   Output (Data,Var,Abs)
+            0x85, 0x22, //   Report ID (34)
+            0x75, 0x08, //   Report Size (8)
+            0x95, 0x10, //   Report Count (16)
+            0x09, 0x03, //   Usage
+            0xb1, 0x02, //   Feature (Data,Var,Abs)
+            0xc0, // End Collection
+        ];
+
+        let report = ReportDescriptor::try_from(bytes.as_slice()).expect("descriptor should parse");
+        let descriptor = HidReportDescriptor::from_hid_report(report);
+
+        assert_eq!(descriptor.input_reports.len(), 1);
+        assert_eq!(descriptor.output_reports.len(), 1);
+        assert_eq!(descriptor.feature_reports.len(), 1);
+
+        let input = &descriptor.input_reports[0];
+        assert_eq!(input.report_id, 0x02);
+        assert_eq!(input.size, 65);
+        assert_eq!(input.usages.len(), 64);
+        assert!(input.usages.iter().all(|&usage| usage >> 16 == 0xff00));
+
+        let output = &descriptor.output_reports[0];
+        assert_eq!(output.report_id, 0x21);
+        assert_eq!(output.size, 33);
+        assert_eq!(output.usages.len(), 32);
+        assert!(output.usages.iter().all(|&usage| usage >> 16 == 0xff00));
+
+        let feature = &descriptor.feature_reports[0];
+        assert_eq!(feature.report_id, 0x22);
+        assert_eq!(feature.size, 17);
+        assert_eq!(feature.usages.len(), 16);
+        assert!(feature.usages.iter().all(|&usage| usage >> 16 == 0xff00));
+    }
 }

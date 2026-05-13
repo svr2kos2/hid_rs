@@ -1,6 +1,5 @@
-
 /// Initialize the logger for the current platform.
-/// 
+///
 /// - Android: Logs to logcat with tag "RustHID"
 /// - iOS: Logs to OS logging system
 /// - WASM: Logs to browser console

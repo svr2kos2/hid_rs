@@ -1,30 +1,17 @@
-use std::{
-    cell::RefCell, 
-    collections::HashMap
-};
 use crate::{
-    hid_error::HidError, 
-    hid_report_descriptor::{
-        HidReportDescriptor, 
-        HidReportInfo
-    },
-    SafeCallback,
-    SafeCallback2
+    hid_error::HidError,
+    hid_report_descriptor::{HidReportDescriptor, HidReportInfo},
+    ConnectionCallback, DeviceId, ProgressCallback, ReportCallback, SubscriptionId,
 };
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
-use js_sys::{
-    wasm_bindgen, Function, Promise, Uint8Array
-};
-use serde::{
-    Deserialize, Serialize
-};
+use js_sys::{wasm_bindgen, Function, Promise, Uint8Array};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen::{JsCast, closure::Closure};
+use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{
-    HidConnectionEvent, HidDevice, HidDeviceRequestOptions, HidInputReportEvent
-};
+use web_sys::{HidConnectionEvent, HidDevice, HidDeviceRequestOptions, HidInputReportEvent};
 
 ////////////////////////////////////////
 // Constants
@@ -36,51 +23,49 @@ const DEVICE_OPEN_DELAY_MS: u32 = 500;
 // Interfaces
 ////////////////////////////////////////
 
-pub(in crate) fn available(uuid: u128) -> bool {
+pub(crate) fn available(uuid: u128) -> bool {
     DEVICE_LIST.with(|list| list.borrow().contains_key(&uuid))
 }
 
-pub(in crate) fn vid(uuid: u128) -> Result<u16, HidError> {
-    DEVICE_LIST.with(|list| {
-        match list.borrow().get(&uuid) {
-            Some(dev) => Ok(dev.device.vendor_id()),
-            None => Err(HidError::new("FAILED to find device")),
-        }
+pub(crate) fn vid(uuid: u128) -> Result<u16, HidError> {
+    DEVICE_LIST.with(|list| match list.borrow().get(&uuid) {
+        Some(dev) => Ok(dev.device.vendor_id()),
+        None => Err(HidError::DeviceNotFound(uuid)),
     })
 }
 
-pub(in crate) fn pid(uuid: u128) -> Result<u16, HidError> {
-    DEVICE_LIST.with(|list| {
-        match list.borrow().get(&uuid) {
-            Some(dev) => Ok(dev.device.product_id()),
-            None => Err(HidError::new("FAILED to find device")),
-        }
+pub(crate) fn pid(uuid: u128) -> Result<u16, HidError> {
+    DEVICE_LIST.with(|list| match list.borrow().get(&uuid) {
+        Some(dev) => Ok(dev.device.product_id()),
+        None => Err(HidError::DeviceNotFound(uuid)),
     })
 }
 
-pub(in crate) fn get_product_name(uuid: u128) -> Result<Option<String>, HidError> {
-    DEVICE_LIST.with(|list| {
-        match list.borrow().get(&uuid) {
-            Some(dev) => Ok(Some(dev.device.product_name())),
-            None => Err(HidError::new("FAILED to find device")),
-        }
+pub(crate) fn get_product_name(uuid: u128) -> Result<Option<String>, HidError> {
+    DEVICE_LIST.with(|list| match list.borrow().get(&uuid) {
+        Some(dev) => Ok(Some(dev.device.product_name())),
+        None => Err(HidError::DeviceNotFound(uuid)),
     })
 }
 
-pub(in crate) fn is_supported() -> bool {
+pub(crate) fn is_supported() -> bool {
     match web_sys::window() {
         Some(window) => {
-            js_sys::Reflect::has(&window.navigator(), &JsValue::from_str("hid"))
-                .unwrap_or(false)
-        },
+            js_sys::Reflect::has(&window.navigator(), &JsValue::from_str("hid")).unwrap_or(false)
+        }
         None => false,
     }
 }
 
-pub(in crate) async fn init() -> Result<(), HidError> {
+/// WebHID has no background poller, so shutdown is a no-op.
+pub(crate) fn shutdown() -> Result<(), HidError> {
+    Ok(())
+}
+
+pub(crate) async fn init() -> Result<(), HidError> {
     if !is_supported() {
         log::debug!("HID is not supported");
-        return Err(HidError::new("HID is not supported"));
+        return Err(HidError::NotSupported);
     }
 
     let api = get_api()?;
@@ -89,22 +74,25 @@ pub(in crate) async fn init() -> Result<(), HidError> {
     let devices = match result {
         Ok(d) => d,
         Err(e) => {
-            return Err(HidError::new(&format!("FAILED to get HID devices: {:?}", e)));
+            return Err(HidError::Io(format!("FAILED to get HID devices: {:?}", e)));
         }
     };
     let devs_array = match devices.dyn_ref::<js_sys::Array>() {
         Some(a) => a,
         None => {
-            return Err(HidError::new("FAILED to cast HID devices to array"));
+            return Err(HidError::Other(
+                "failed to cast HID devices to array".to_string(),
+            ));
         }
     };
     for device_value in devs_array.iter() {
-        let device = device_value.dyn_into::<HidDevice>()
-            .map_err(|_| HidError::new("Failed to cast to HidDevice"))?;
+        let device = device_value
+            .dyn_into::<HidDevice>()
+            .map_err(|_| HidError::Other("failed to cast to HidDevice".to_string()))?;
         match add_device(device).await {
             Ok(_) => (),
             Err(e) => {
-                return Err(HidError::new(&format!("FAILED to add device: {:?}", e)));
+                return Err(HidError::Io(format!("FAILED to add device: {:?}", e)));
             }
         };
     }
@@ -112,41 +100,48 @@ pub(in crate) async fn init() -> Result<(), HidError> {
     // Create event handlers using Closure instead of Function with string code
     let connect = Closure::wrap(Box::new(|event: JsValue| {
         wasm_bindgen_futures::spawn_local(async move {
+            // returns JS Promise; nothing to log here
             let _ = on_connection_changed(event, true).await;
         });
     }) as Box<dyn Fn(JsValue)>);
-    
+
     let disconnect = Closure::wrap(Box::new(|event: JsValue| {
         wasm_bindgen_futures::spawn_local(async move {
             let _ = on_connection_changed(event, false).await;
         });
     }) as Box<dyn Fn(JsValue)>);
-    
+
     let api = get_api()?;
     api.set_onconnect(Some(connect.as_ref().unchecked_ref()));
     api.set_ondisconnect(Some(disconnect.as_ref().unchecked_ref()));
-    
+
     // Prevent closures from being dropped
     connect.forget();
     disconnect.forget();
-    
+
     Ok(())
 }
 
-pub(in crate) async fn request_device(vendor_ids: Vec<(u16, Option<u16>)>) -> Result<Vec<u128>, HidError> {
-    let filters: Vec<WebHidFilter> = vendor_ids.iter().map(|(vendor_id, pid)| {
-        WebHidFilter {
-            vendor_id : Some(*vendor_id),
-            product_id : *pid,
-            usage_page : None,  
-            usage : None,
-        }
-    }).collect();
+pub(crate) async fn request_device(
+    vendor_ids: Vec<(u16, Option<u16>)>,
+) -> Result<Vec<u128>, HidError> {
+    let filters: Vec<WebHidFilter> = vendor_ids
+        .iter()
+        .map(|(vendor_id, pid)| WebHidFilter {
+            vendor_id: Some(*vendor_id),
+            product_id: *pid,
+            usage_page: None,
+            usage: None,
+        })
+        .collect();
 
     let hid_filter = match serde_wasm_bindgen::to_value(&filters) {
         Ok(f) => f,
         Err(e) => {
-            return Err(HidError::new(&format!("FAILED to serialize HID filters: {:?}", e)));
+            return Err(HidError::Io(format!(
+                "FAILED to serialize HID filters: {:?}",
+                e
+            )));
         }
     };
     let options = HidDeviceRequestOptions::new(&hid_filter);
@@ -155,13 +150,18 @@ pub(in crate) async fn request_device(vendor_ids: Vec<(u16, Option<u16>)>) -> Re
     let devices = match result {
         Ok(d) => d,
         Err(e) => {
-            return Err(HidError::new(&format!("FAILED to request HID devices: {:?}", e)));
+            return Err(HidError::Io(format!(
+                "FAILED to request HID devices: {:?}",
+                e
+            )));
         }
     };
     let devs_array = match devices.dyn_ref::<js_sys::Array>() {
         Some(a) => a,
         None => {
-            return Err(HidError::new("FAILED to cast HID devices to array"));
+            return Err(HidError::Other(
+                "failed to cast HID devices to array".to_string(),
+            ));
         }
     };
     if devs_array.length() < 1 {
@@ -170,15 +170,16 @@ pub(in crate) async fn request_device(vendor_ids: Vec<(u16, Option<u16>)>) -> Re
 
     let mut uuids = Vec::new();
     for device_value in devs_array.iter() {
-        let device = device_value.dyn_into::<HidDevice>()
-            .map_err(|_| HidError::new("Failed to cast to HidDevice"))?;
+        let device = device_value
+            .dyn_into::<HidDevice>()
+            .map_err(|_| HidError::Other("failed to cast to HidDevice".to_string()))?;
         log::debug!("request device {:?}", device.product_name());
         match find_device(&device) {
             Some(uuid) => {
                 log::debug!("device already exist");
                 uuids.push(uuid);
                 continue;
-            },
+            }
             None => (),
         }
         match add_device(device).await {
@@ -187,57 +188,48 @@ pub(in crate) async fn request_device(vendor_ids: Vec<(u16, Option<u16>)>) -> Re
                 None => (),
             },
             Err(e) => {
-                return Err(HidError::new(&format!("FAILED to add device: {:?}", e)));
+                return Err(HidError::Io(format!("FAILED to add device: {:?}", e)));
             }
         };
     }
     Ok(uuids)
 }
 
-pub(in crate) fn get_device_list() -> Result<Vec<u128>, HidError> {
-    let list = DEVICE_LIST.with(|list| {
-        list.borrow().keys().copied().collect()
-    });
+pub(crate) fn get_device_list() -> Result<Vec<u128>, HidError> {
+    let list = DEVICE_LIST.with(|list| list.borrow().keys().copied().collect());
     Ok(list)
 }
 
-pub(in crate) async fn sub_connection_changed(callback: SafeCallback2<u128, bool, ()>) -> Result<(), HidError> {
-    log::debug!("sub_connection_changed");
-    let uuids: Vec<u128> = DEVICE_LIST.with(|list| {
-        list.borrow().iter().map(|(uuid, _)| *uuid).collect()
+pub(crate) fn register_connection_listener(
+    id: SubscriptionId,
+    callback: ConnectionCallback,
+) -> Result<(), HidError> {
+    log::debug!("register_connection_listener");
+    let uuids: Vec<u128> = DEVICE_LIST.with(|list| list.borrow().keys().copied().collect());
+    DEVICE_CONNECTION_LISTENERS.with(|listeners| {
+        listeners.borrow_mut().insert(id, callback.clone());
     });
     for uuid in uuids {
-        let _ = callback.call(uuid, true).await;
+        callback(DeviceId(uuid), true);
     }
+    Ok(())
+}
+
+pub(crate) fn unregister_connection_listener(id: SubscriptionId) -> Result<(), HidError> {
     DEVICE_CONNECTION_LISTENERS.with(|listeners| {
-        listeners.borrow_mut().push(callback);
+        listeners.borrow_mut().remove(&id);
     });
     Ok(())
 }
 
-pub(in crate) async fn unsub_connection_changed(callback: SafeCallback2<u128, bool, ()>) -> Result<(), HidError> {
-    let uuids: Vec<u128> = DEVICE_LIST.with(|list| {
-        list.borrow().keys().map(|k| *k).collect()
-    });
-    for uuid in uuids {
-        let _ = callback.call(uuid, false).await;
-    }
-    DEVICE_CONNECTION_LISTENERS.with(|listeners| {
-        listeners.borrow_mut().retain(|l| !l.ptr_eq(&callback));
-    });
-    Ok(())
-}
-
-pub(in crate) fn get_collections(uuid : u128) -> Result<HidReportDescriptor, HidError> {
-    DEVICE_LIST.with(|list| {
-        match list.borrow().get(&uuid) {
-            Some(dev) => Ok(dev.descriptor.clone()),
-            None => Err(HidError::new("FAILED to find device")),
-        }
+pub(crate) fn get_collections(uuid: u128) -> Result<HidReportDescriptor, HidError> {
+    DEVICE_LIST.with(|list| match list.borrow().get(&uuid) {
+        Some(dev) => Ok(dev.descriptor.clone()),
+        None => Err(HidError::DeviceNotFound(uuid)),
     })
 }
 
-pub(in crate) fn has_report_id(uuid: u128, report_id: u8) -> Result<bool, HidError> {
+pub(crate) fn has_report_id(uuid: u128, report_id: u8) -> Result<bool, HidError> {
     let pack = match get_device(uuid) {
         Ok(d) => d,
         Err(e) => return Err(e),
@@ -245,9 +237,9 @@ pub(in crate) fn has_report_id(uuid: u128, report_id: u8) -> Result<bool, HidErr
     Ok(pack.report_info.contains_key(&report_id))
 }
 
-pub(in crate) async fn send_report(uuid: u128, data: &[u8]) -> Result<usize, HidError> {
+pub(crate) async fn send_report(uuid: u128, data: Vec<u8>) -> Result<usize, HidError> {
     if data.is_empty() {
-        return Err(HidError::new("FAILED to send report: data is empty"));
+        return Err(HidError::EmptyData);
     }
     let report_id = data[0];
     let pack = match get_device(uuid) {
@@ -256,11 +248,14 @@ pub(in crate) async fn send_report(uuid: u128, data: &[u8]) -> Result<usize, Hid
     };
     let size = match pack.report_info.get(&report_id) {
         Some(r) => r.size,
-        None => return Err(HidError::new("FAILED to send report: report id not found")),
+        None => return Err(HidError::ReportIdMissing { uuid, report_id }),
     };
 
     if data.len() > size {
-        return Err(HidError::new("FAILED to send report: data size is too large"));
+        return Err(HidError::DataTooLarge {
+            max: size,
+            got: data.len(),
+        });
     }
 
     let device = pack.device;
@@ -268,7 +263,9 @@ pub(in crate) async fn send_report(uuid: u128, data: &[u8]) -> Result<usize, Hid
 
     let mut send_data = data.to_vec();
     send_data.resize(size, 0);
-    let _ = device.send_report_with_u8_slice(report_id, &mut send_data[1..]);
+    if let Err(e) = device.send_report_with_u8_slice(report_id, &mut send_data[1..]) {
+        return Err(HidError::Io(format!("WebHID send_report failed: {e:?}")));
+    }
     Ok(send_data.len())
 }
 
@@ -278,7 +275,7 @@ async fn ensure_device_open(device: &HidDevice) -> Result<(), HidError> {
         let promise = device.open();
         match JsFuture::from(promise).await {
             Ok(_) => log::debug!("open device done"),
-            Err(err) => return Err(HidError::new(&format!("FAILED to open device: {:?}", err))),
+            Err(err) => return Err(HidError::Io(format!("FAILED to open device: {:?}", err))),
         }
     }
     Ok(())
@@ -293,25 +290,29 @@ pub async fn send_firmware_progress(progress: JsValue) -> Promise {
             return Promise::resolve(&JsValue::NULL);
         }
     };
-    
-    let listener = SEND_FIRMWARE_PROGRESS.with(|listeners| {
-        listeners.borrow().first().cloned()
-    });
-    
+
+    let listener = SEND_FIRMWARE_PROGRESS.with(|listeners| listeners.borrow().clone());
+
     if let Some(listener) = listener {
-        listener.call(progress).await;
+        listener(progress);
     }
     Promise::resolve(&JsValue::NULL)
 }
 
-const JS_CODE: &str = include_str!("send_firmware.js");
-pub(in crate) async fn send_firmware(uuid: u128, firmware: &mut Vec<u8>, 
-    write_data_cmd:u8, size_addr: u8, big_endian: u8, err_for_size: u8, encrypt: u8, check_sum: u8,
-    on_progress: SafeCallback<f64, ()>) -> Result<usize, HidError> {
-    
+const JS_CODE: &str = include_str!("../js/send_firmware.js");
+pub(crate) async fn send_firmware(
+    uuid: u128,
+    firmware: &mut Vec<u8>,
+    write_data_cmd: u8,
+    size_addr: u8,
+    big_endian: u8,
+    err_for_size: u8,
+    encrypt: u8,
+    check_sum: u8,
+    on_progress: ProgressCallback,
+) -> Result<usize, HidError> {
     SEND_FIRMWARE_PROGRESS.with(|progress| {
-        progress.borrow_mut().clear();
-        progress.borrow_mut().push(on_progress);
+        *progress.borrow_mut() = Some(on_progress);
     });
 
     log::debug!("send_firmware {:?}", firmware.len());
@@ -322,8 +323,7 @@ pub(in crate) async fn send_firmware(uuid: u128, firmware: &mut Vec<u8>,
     let device = pack.device;
     ensure_device_open(&device).await?;
 
-    let send_fun = Function::new_with_args("device, firmware", 
-    JS_CODE);
+    let send_fun = Function::new_with_args("device, firmware", JS_CODE);
 
     firmware.push(check_sum);
     firmware.push(encrypt);
@@ -331,10 +331,10 @@ pub(in crate) async fn send_firmware(uuid: u128, firmware: &mut Vec<u8>,
     firmware.push(size_addr);
     firmware.push(big_endian);
     firmware.push(err_for_size);
-    
+
     let promise = match send_fun.call2(
-        &JsValue::NULL, 
-        &device, 
+        &JsValue::NULL,
+        &device,
         &Uint8Array::from(firmware.as_slice()),
     ) {
         Ok(p) => Promise::from(p),
@@ -343,10 +343,10 @@ pub(in crate) async fn send_firmware(uuid: u128, firmware: &mut Vec<u8>,
             remove_device(uuid).await;
             // Clean up progress listener
             SEND_FIRMWARE_PROGRESS.with(|progress| {
-                progress.borrow_mut().clear();
+                *progress.borrow_mut() = None;
             });
-            return Err(HidError::new(&format!("FAILED to send report: {:?}", err)));
-        },
+            return Err(HidError::Io(format!("FAILED to send report: {:?}", err)));
+        }
     };
 
     let res = match JsFuture::from(promise).await {
@@ -354,42 +354,44 @@ pub(in crate) async fn send_firmware(uuid: u128, firmware: &mut Vec<u8>,
             if success.as_bool().unwrap_or(false) {
                 Ok(firmware.len())
             } else {
-                Err(HidError::new("FAILED to send report: failed to send firmware"))
+                Err(HidError::Io("failed to send firmware".to_string()))
             }
-        },
+        }
         Err(err) => {
             log::debug!("FAILED to send report: {:?}", err);
             remove_device(uuid).await;
-            Err(HidError::new(&format!("FAILED to send report: {:?}", err)))
-        },
+            Err(HidError::Io(format!("FAILED to send report: {:?}", err)))
+        }
     };
 
     // Always clean up progress listener
     SEND_FIRMWARE_PROGRESS.with(|progress| {
-        progress.borrow_mut().clear();
+        *progress.borrow_mut() = None;
     });
 
     res
 }
 
-pub(in crate) async fn sub_report_arrive(uuid: u128, callback: SafeCallback2<u128, Vec<u8>, ()>) -> Result<(), HidError> {
+pub(crate) fn register_report_listener(
+    uuid: u128,
+    id: SubscriptionId,
+    callback: ReportCallback,
+) -> Result<(), HidError> {
     DEVICE_REPORT_LISTENERS.with(|listeners| {
         let mut binding = listeners.borrow_mut();
-        match binding.get_mut(&uuid) {
-            Some(list) => list.push(callback),
-            None => {
-                binding.insert(uuid, vec!(callback));
-            }
-        }
+        binding.entry(uuid).or_default().insert(id, callback);
     });
     Ok(())
 }
 
-pub(in crate) async fn unsub_report_arrive(uuid: u128, callback: SafeCallback2<u128, Vec<u8>, ()>) -> Result<(), HidError> {
+pub(crate) fn unregister_report_listener(uuid: u128, id: SubscriptionId) -> Result<(), HidError> {
     DEVICE_REPORT_LISTENERS.with(|listeners| {
-        match listeners.borrow_mut().get_mut(&uuid) {
-            Some(list) => list.retain(|l| !l.ptr_eq(&callback)),
-            None => (),
+        let mut binding = listeners.borrow_mut();
+        if let Some(map) = binding.get_mut(&uuid) {
+            map.remove(&id);
+            if map.is_empty() {
+                binding.remove(&uuid);
+            }
         }
     });
     Ok(())
@@ -399,10 +401,10 @@ pub(in crate) async fn unsub_report_arrive(uuid: u128, callback: SafeCallback2<u
 // Global variables
 ////////////////////////////////////////
 thread_local! {
-    static SEND_FIRMWARE_PROGRESS: RefCell<Vec<SafeCallback<f64, ()>>> = RefCell::new(Vec::new());
+    static SEND_FIRMWARE_PROGRESS: RefCell<Option<ProgressCallback>> = RefCell::new(None);
     static DEVICE_LIST: RefCell<HashMap<u128, HidDevicePackage>> = RefCell::new(HashMap::new());
-    static DEVICE_CONNECTION_LISTENERS: RefCell<Vec<SafeCallback2<u128, bool, ()>>> = RefCell::new(Vec::new());
-    static DEVICE_REPORT_LISTENERS: RefCell<HashMap<u128, Vec<SafeCallback2<u128, Vec<u8>, ()>>>> = RefCell::new(HashMap::new());
+    static DEVICE_CONNECTION_LISTENERS: RefCell<HashMap<SubscriptionId, ConnectionCallback>> = RefCell::new(HashMap::new());
+    static DEVICE_REPORT_LISTENERS: RefCell<HashMap<u128, HashMap<SubscriptionId, ReportCallback>>> = RefCell::new(HashMap::new());
 }
 
 ////////////////////////////////////////
@@ -415,42 +417,38 @@ struct HidDevicePackage {
     descriptor: HidReportDescriptor,
 }
 
-
 ////////////////////////////////////////
 // Event notification
 ////////////////////////////////////////
-async fn notify_connection_changed(uuid: u128, connected: bool) {
+fn notify_connection_changed(uuid: u128, connected: bool) {
     log::debug!("notify_connection_changed {:?}", connected);
-    let listeners = DEVICE_CONNECTION_LISTENERS.with(|listeners| {
-        log::debug!("listener count {:?}", listeners.borrow().len());
-        listeners.borrow().clone()
-    });
+    let listeners: Vec<ConnectionCallback> = DEVICE_CONNECTION_LISTENERS
+        .with(|listeners| listeners.borrow().values().cloned().collect());
     for listener in listeners {
-        log::debug!("notify listener");
-        listener.call(uuid, connected).await;
-        log::debug!("listener done");
+        listener(DeviceId(uuid), connected);
     }
 }
 
-async fn notify_report_arrive(uuid: u128, report: Vec<u8>) {
-    DEVICE_REPORT_LISTENERS.with(|listeners| {
-        if let Some(list) = listeners.borrow().get(&uuid) {
-            let listeners_clone = list.clone();
-            // 在闭包外执行异步操作
-            wasm_bindgen_futures::spawn_local(async move {
-                for listener in listeners_clone {
-                    listener.call(uuid, report.clone()).await;
-                }
-            });
-        }
-    });
+fn notify_report_arrive(uuid: u128, report: Vec<u8>) {
+    let listeners: Vec<ReportCallback> =
+        DEVICE_REPORT_LISTENERS.with(|listeners| match listeners.borrow().get(&uuid) {
+            Some(map) => map.values().cloned().collect(),
+            None => Vec::new(),
+        });
+    if listeners.is_empty() {
+        return;
+    }
+    let shared: Arc<[u8]> = Arc::from(report.into_boxed_slice());
+    for listener in listeners {
+        listener(DeviceId(uuid), shared.clone());
+    }
 }
 
 ////////////////////////////////////////
 // JavaScript interfaces
 ////////////////////////////////////////
 #[derive(Serialize, Deserialize, Debug, Default)]
-pub(in crate) struct WebHidFilter {
+pub(crate) struct WebHidFilter {
     #[serde(rename = "vendorId")]
     pub vendor_id: Option<u16>,
     #[serde(rename = "productId")]
@@ -473,7 +471,9 @@ pub async fn on_connection_changed(event_js: JsValue, connected: bool) -> Promis
     let device = event.device();
     if connected {
         log::debug!("{}", device.product_name().as_str());
-        let _ = add_device(device).await;
+        if let Err(e) = add_device(device).await {
+            log::warn!("add_device failed: {e}");
+        }
     } else {
         match find_device(&device) {
             Some(uuid) => remove_device(uuid).await,
@@ -501,13 +501,13 @@ pub async fn on_device_report_arrived(event_js: JsValue) -> Promise {
     let data_view = event.data();
     let mut data: Vec<u8> = vec![0; data_view.byte_length() + 1];
     data[0] = report_id;
-    
+
     for i in 0..data_view.byte_length() {
         data[i + 1] = data_view.get_uint8(i + data_view.byte_offset());
     }
-    
+
     match find_device(&device) {
-        Some(uuid) => notify_report_arrive(uuid, data).await,
+        Some(uuid) => notify_report_arrive(uuid, data),
         None => (),
     };
     Promise::resolve(&JsValue::NULL)
@@ -516,18 +516,16 @@ pub async fn on_device_report_arrived(event_js: JsValue) -> Promise {
 ////////////////////////////////////////
 // Internal functions
 ////////////////////////////////////////
-pub(in crate) fn get_api() -> Result<web_sys::Hid, HidError> {
-    let window = web_sys::window()
-        .ok_or_else(|| HidError::new("Cannot get window"))?;
+pub(crate) fn get_api() -> Result<web_sys::Hid, HidError> {
+    let window =
+        web_sys::window().ok_or_else(|| HidError::Other("cannot get window".to_string()))?;
     Ok(window.navigator().hid())
 }
 
 fn get_device(uuid: u128) -> Result<HidDevicePackage, HidError> {
-    DEVICE_LIST.with(|list| {
-        match list.borrow().get(&uuid) {
-            Some(dev) => Ok(dev.clone()),
-            None => Err(HidError::new("FAILED to find device")),
-        }
+    DEVICE_LIST.with(|list| match list.borrow().get(&uuid) {
+        Some(dev) => Ok(dev.clone()),
+        None => Err(HidError::DeviceNotFound(uuid)),
     })
 }
 
@@ -547,16 +545,18 @@ async fn add_device(device: HidDevice) -> Result<Option<u128>, HidError> {
         Some(_) => {
             log::debug!("device already exist");
             return Ok(None);
-        },
+        }
         None => (),
     };
 
     future_delay(DEVICE_OPEN_DELAY_MS).await;
     let collections = get_collections_by_device(device.clone());
 
-    let has_report_id = collections.output_reports.iter()
+    let has_report_id = collections
+        .output_reports
+        .iter()
         .any(|r| SUPPORTED_REPORT_IDS.contains(&r.report_id));
-    
+
     if !has_report_id {
         return Ok(None);
     }
@@ -568,30 +568,36 @@ async fn add_device(device: HidDevice) -> Result<Option<u128>, HidError> {
 
     let on_report = Closure::wrap(Box::new(|event: JsValue| {
         wasm_bindgen_futures::spawn_local(async move {
+            // returns JS Promise; nothing to log here
             let _ = on_device_report_arrived(event).await;
         });
     }) as Box<dyn Fn(JsValue)>);
-    
+
     device.set_oninputreport(Some(on_report.as_ref().unchecked_ref()));
     on_report.forget();
 
     let uuid = Uuid::new_v4().as_u128();
-    let report_info = collections.input_reports.iter()
+    let report_info = collections
+        .input_reports
+        .iter()
         .map(|r| (r.report_id, r.clone()))
         .collect();
     DEVICE_LIST.with(|list| {
-        list.borrow_mut().insert(uuid, HidDevicePackage {
-            device: device.clone(),
-            report_info,
-            descriptor: collections,
-        });
+        list.borrow_mut().insert(
+            uuid,
+            HidDevicePackage {
+                device: device.clone(),
+                report_info,
+                descriptor: collections,
+            },
+        );
     });
-    notify_connection_changed(uuid, true).await;
+    notify_connection_changed(uuid, true);
     Ok(Some(uuid))
 }
 
 async fn remove_device(uuid: u128) {
-    notify_connection_changed(uuid, false).await;
+    notify_connection_changed(uuid, false);
     DEVICE_LIST.with(|list| {
         list.borrow_mut().remove(&uuid);
     });
@@ -603,7 +609,7 @@ async fn remove_device(uuid: u128) {
 fn get_collections_by_device(device: HidDevice) -> HidReportDescriptor {
     let collections = device.collections();
     let mut res = HidReportDescriptor::new();
-    
+
     for collection in collections.iter() {
         if let Some(info) = HidReportDescriptor::from_js_value(collection) {
             res.output_reports.extend(info.output_reports);
@@ -623,5 +629,3 @@ async fn future_delay(ms: u32) {
     });
     JsFuture::from(promise).await.unwrap();
 }
-
-use std::sync::Arc;
