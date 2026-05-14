@@ -41,6 +41,10 @@ pub(crate) fn pid(uuid: u128) -> Result<u16, HidError> {
     })
 }
 
+pub(crate) fn get_serial_number(uuid: u128) -> Result<Option<String>, HidError> {
+    Ok(None)
+}
+
 pub(crate) fn get_product_name(uuid: u128) -> Result<Option<String>, HidError> {
     DEVICE_LIST.with(|list| match list.borrow().get(&uuid) {
         Some(dev) => Ok(Some(dev.device.product_name())),
@@ -488,29 +492,51 @@ pub async fn on_connection_changed(event_js: JsValue, connected: bool) -> Promis
 }
 
 #[wasm_bindgen]
-pub async fn on_device_report_arrived(event_js: JsValue) -> Promise {
+pub fn on_device_report_arrived(event_js: JsValue) -> Promise {
+    handle_input_report_event(event_js);
+    Promise::resolve(&JsValue::NULL)
+}
+
+/// Synchronous fast-path for an `inputreport` event.
+///
+/// Performance notes:
+/// - Uses a single bulk `Uint8Array::copy_to` instead of per-byte
+///   `DataView::get_uint8` calls (avoids one JS↔WASM boundary crossing
+///   per byte of the report payload).
+/// - Dispatches synchronously; the caller (the JS `inputreport` event
+///   handler) intentionally does not spawn a microtask, so report
+///   delivery happens in the same task the browser fires the event on.
+fn handle_input_report_event(event_js: JsValue) {
     let event = match event_js.dyn_into::<HidInputReportEvent>() {
         Ok(e) => e,
         Err(_) => {
             log::debug!("FAILED to cast JsValue to HidInputReportEvent");
-            return Promise::resolve(&JsValue::NULL);
+            return;
         }
     };
     let device = event.device();
+    let uuid = match find_device(&device) {
+        Some(u) => u,
+        None => return,
+    };
+
     let report_id = event.report_id();
     let data_view = event.data();
-    let mut data: Vec<u8> = vec![0; data_view.byte_length() + 1];
+    let byte_len = data_view.byte_length();
+
+    let mut data: Vec<u8> = vec![0u8; byte_len + 1];
     data[0] = report_id;
 
-    for i in 0..data_view.byte_length() {
-        data[i + 1] = data_view.get_uint8(i + data_view.byte_offset());
+    if byte_len > 0 {
+        let array = Uint8Array::new_with_byte_offset_and_length(
+            &data_view.buffer(),
+            data_view.byte_offset() as u32,
+            byte_len as u32,
+        );
+        array.copy_to(&mut data[1..]);
     }
 
-    match find_device(&device) {
-        Some(uuid) => notify_report_arrive(uuid, data),
-        None => (),
-    };
-    Promise::resolve(&JsValue::NULL)
+    notify_report_arrive(uuid, data);
 }
 
 ////////////////////////////////////////
@@ -566,11 +592,10 @@ async fn add_device(device: HidDevice) -> Result<Option<u128>, HidError> {
         Err(err) => log::debug!("open device failed {:?}", err),
     }
 
+    // Dispatch inputreport synchronously from the browser-fired event
+    // (no spawn_local microtask hop) to minimize per-report latency.
     let on_report = Closure::wrap(Box::new(|event: JsValue| {
-        wasm_bindgen_futures::spawn_local(async move {
-            // returns JS Promise; nothing to log here
-            let _ = on_device_report_arrived(event).await;
-        });
+        handle_input_report_event(event);
     }) as Box<dyn Fn(JsValue)>);
 
     device.set_oninputreport(Some(on_report.as_ref().unchecked_ref()));
