@@ -6,12 +6,14 @@ use crate::{
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use js_sys::{wasm_bindgen, Function, Promise, Uint8Array};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{HidConnectionEvent, HidDevice, HidDeviceRequestOptions, HidInputReportEvent};
+use web_sys::{
+    HidConnectionEvent, HidDevice, HidDeviceFilter, HidDeviceRequestOptions,
+    HidInputReportEvent,
+};
 
 ////////////////////////////////////////
 // Constants
@@ -129,26 +131,19 @@ pub(crate) async fn init() -> Result<(), HidError> {
 pub(crate) async fn request_device(
     vendor_ids: Vec<(u16, Option<u16>)>,
 ) -> Result<Vec<u128>, HidError> {
-    let filters: Vec<WebHidFilter> = vendor_ids
+    let filters: Vec<HidDeviceFilter> = vendor_ids
         .iter()
-        .map(|(vendor_id, pid)| WebHidFilter {
-            vendor_id: Some(*vendor_id),
-            product_id: *pid,
-            usage_page: None,
-            usage: None,
+        .map(|(vendor_id, pid)| {
+            let filter = HidDeviceFilter::new();
+            filter.set_vendor_id(u32::from(*vendor_id));
+            if let Some(product_id) = pid {
+                filter.set_product_id(*product_id);
+            }
+            filter
         })
         .collect();
 
-    let hid_filter = match serde_wasm_bindgen::to_value(&filters) {
-        Ok(f) => f,
-        Err(e) => {
-            return Err(HidError::Io(format!(
-                "FAILED to serialize HID filters: {:?}",
-                e
-            )));
-        }
-    };
-    let options = HidDeviceRequestOptions::new(&hid_filter);
+    let options = HidDeviceRequestOptions::new(&filters);
     let promise = get_api()?.request_device(&options);
     let result = JsFuture::from(promise).await;
     let devices = match result {
@@ -451,17 +446,6 @@ fn notify_report_arrive(uuid: u128, report: Vec<u8>) {
 ////////////////////////////////////////
 // JavaScript interfaces
 ////////////////////////////////////////
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub(crate) struct WebHidFilter {
-    #[serde(rename = "vendorId")]
-    pub vendor_id: Option<u16>,
-    #[serde(rename = "productId")]
-    pub product_id: Option<u16>,
-    #[serde(rename = "usagePage")]
-    pub usage_page: Option<u16>,
-    pub usage: Option<u16>,
-}
-
 #[wasm_bindgen]
 pub async fn on_connection_changed(event_js: JsValue, connected: bool) -> Promise {
     log::debug!("on_connection_changed {:?}", connected);
@@ -636,7 +620,7 @@ fn get_collections_by_device(device: HidDevice) -> HidReportDescriptor {
     let mut res = HidReportDescriptor::new();
 
     for collection in collections.iter() {
-        if let Some(info) = HidReportDescriptor::from_js_value(collection) {
+        if let Some(info) = HidReportDescriptor::from_js_value(collection.into()) {
             res.output_reports.extend(info.output_reports);
             res.input_reports.extend(info.input_reports);
             res.feature_reports.extend(info.feature_reports);

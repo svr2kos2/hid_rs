@@ -39,11 +39,10 @@ oslog = "0.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_log = "1.0"
-web-sys = { version = "0.3", features = ["Hid", "HidDevice", "Navigator", "Window", "HidDeviceRequestOptions", "HidConnectionEvent", "HidInputReportEvent"] }
+web-sys = { version = "0.3.98", features = ["Hid", "HidDevice", "HidDeviceFilter", "HidCollectionInfo", "Navigator", "Window", "HidDeviceRequestOptions", "HidConnectionEvent", "HidInputReportEvent"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-serde-wasm-bindgen = "0.6"
 
 [[example]]
 name = "simple_test"
