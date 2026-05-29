@@ -271,7 +271,7 @@ pub(crate) async fn send_report(uuid: u128, mut data: Vec<u8>) -> Result<usize, 
     // Pad data to required size
     data.resize(size, 0);
 
-    // log::debug!("Sending report: {:02X?}", data);
+    // println!("Sending report: {:02X?}", data);
     let res = match device_guard.write(&data) {
         Ok(written_size) => Ok(written_size),
         Err(err) => {
