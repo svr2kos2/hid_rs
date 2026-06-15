@@ -692,7 +692,8 @@ fn update_device_list(vendor_ids: Vec<(u16, u16)>) -> Result<(), HidError> {
             None => {
                 // New device
                 // log::debug!("New device found");
-                let uuid = uuid::Uuid::new_v4().as_u128();
+                // Mint outside the reserved dummy-device range.
+                let uuid = crate::get_uuid();
 
                 // Per-device bounded channel: reader threads `try_send` reports
                 // into it; a dedicated dispatcher thread drains it and fires

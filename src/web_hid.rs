@@ -585,7 +585,8 @@ async fn add_device(device: HidDevice) -> Result<Option<u128>, HidError> {
     device.set_oninputreport(Some(on_report.as_ref().unchecked_ref()));
     on_report.forget();
 
-    let uuid = Uuid::new_v4().as_u128();
+    // Mint outside the reserved dummy-device range.
+    let uuid = crate::get_uuid();
     let report_info = collections
         .input_reports
         .iter()
