@@ -391,6 +391,7 @@ impl HidDevicePackage {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn spawn_reading_thread(
         &self,
         reader_device: HidDevice,
@@ -476,9 +477,137 @@ impl HidDevicePackage {
                     }
                     Err(TrySendError::Full(_)) => {
                         crate::decrement_queue_depth(queue_depth.as_ref());
-                        // Capacity reached; drop the newest packet to keep
-                        // the reader running. The high-water warning above
-                        // already fired (or is being suppressed).
+                        log::warn!(
+                            "report queue full ({}); dropping packet for device {:032x}",
+                            REPORT_QUEUE_CAP,
+                            uuid
+                        );
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        crate::decrement_queue_depth(queue_depth.as_ref());
+                        log::debug!("dispatcher gone for device {:032x}, reader exiting", uuid);
+                        break;
+                    }
+                }
+            }
+
+            // Decrement the reader-count for this package. 
+            // If we were the last reader, the whole device is now fully disconnected and should be removed from the global list; 
+            // otherwise leave the package alive so sibling interfaces can keep operating.
+            let remaining = reader_count
+                .fetch_sub(1, Ordering::Relaxed)
+                .saturating_sub(1);
+            if remaining > 0 {
+                log::debug!(
+                    "Reading thread exit {:2X?}; {} reader(s) still live for device {:032x}",
+                    report_ids,
+                    remaining,
+                    uuid
+                );
+                return;
+            }
+
+            log::debug!(
+                "Reading thread exit {:2X?}; last reader, removing device {:032x}",
+                report_ids,
+                uuid
+            );
+            if let Err(err) = remove_device(uuid) {
+                log::debug!("Failed to remove device: {:?}", err);
+            }
+        });
+        Ok(handle)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn spawn_reading_thread_nonblocking(
+        &self,
+        device: Arc<Mutex<HidDevice>>,
+        device_path: String,
+        descriptor: HidReportDescriptor,
+    ) -> Result<std::thread::JoinHandle<()>, HidError> {
+        let report_ids: Vec<u8> = descriptor
+            .input_reports
+            .iter()
+            .map(|report| report.report_id)
+            .collect();
+
+        // Set non-blocking mode for the shared device handle
+        device
+            .lock()
+            .map_err(|_| HidError::new("Failed to lock device for blocking mode setting"))?
+            .set_blocking_mode(false)
+            .map_err(|_| HidError::new("Failed to set non-blocking mode"))?;
+
+        log::debug!(
+            "{:?} {:2X?} Set blocking mode to false (non-blocking)",
+            device_path,
+            report_ids
+        );
+
+        let uuid = self.uuid;
+        let dev_path = device_path;
+        let abort = self.abort.clone();
+        let tx = self
+            .report_tx
+            .lock()
+            .map_err(|_| HidError::lock_poisoned("HidDevicePackage::report_tx"))?
+            .as_ref()
+            .ok_or_else(|| HidError::Other("report channel already closed".into()))?
+            .clone();
+        let queue_depth = self.queue_depth.clone();
+        let queue_warned = self.queue_warned.clone();
+        let reader_count = self.reader_count.clone();
+        reader_count.fetch_add(1, Ordering::Relaxed);
+
+        let handle = std::thread::spawn(move || {
+            let mut buffer = vec![0; READ_BUFFER_SIZE];
+            log::debug!(
+                "Reading thread running for device {:X?} {:02X?}",
+                uuid,
+                dev_path
+            );
+
+            loop {
+                if abort.load(Ordering::Relaxed) {
+                    log::debug!("Reading thread aborting");
+                    break;
+                }
+
+                // Lock the shared device mutex for a non-blocking read
+                let read_res = match device.lock() {
+                    Ok(dev) => dev.read(&mut buffer),
+                    Err(_) => break, // lock poisoned
+                };
+
+                let shared: Arc<[u8]> = match read_res {
+                    Ok(0) => {
+                        sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    Ok(len) => Arc::from(buffer[..len].to_vec().into_boxed_slice()),
+                    Err(err) => {
+                        log::debug!("{:2X?} Failed to read report: {:?}", report_ids, err);
+                        sleep(std::time::Duration::from_millis(READ_RETRY_DELAY_MS));
+                        break;
+                    }
+                };
+
+                // Hand off to the per-device dispatcher; never block the reader.
+                let new_depth = crate::increment_queue_depth(queue_depth.as_ref());
+                match tx.try_send(shared) {
+                    Ok(()) => {
+                        if new_depth >= REPORT_QUEUE_WARN_THRESHOLD
+                            && !queue_warned.swap(true, Ordering::Relaxed)
+                        {
+                            log::warn!(
+                                "report queue backlog {} >= {} for device {:032x}; consumer is slow",
+                                new_depth, REPORT_QUEUE_WARN_THRESHOLD, uuid
+                            );
+                        }
+                    }
+                    Err(TrySendError::Full(_)) => {
+                        crate::decrement_queue_depth(queue_depth.as_ref());
                         log::warn!(
                             "report queue full ({}); dropping packet for device {:032x}",
                             REPORT_QUEUE_CAP,
@@ -537,12 +666,19 @@ impl HidDevicePackage {
             return Ok(false); // Device already exists
         }
 
-        // Open a handle for writing/feature ops (shared via mutex)
+        #[cfg(target_os = "macos")]
+        let device =
+            Arc::new(Mutex::new(device_info.open_device(api).map_err(|_| {
+                HidError::new("Failed to open device")
+            })?));
+
+        #[cfg(not(target_os = "macos"))]
         let device =
             Arc::new(Mutex::new(device_info.open_device(api).map_err(|_| {
                 HidError::new("Failed to open device (write handle)")
             })?));
-        // Open a dedicated handle for blocking reads to avoid mutex contention
+
+        #[cfg(not(target_os = "macos"))]
         let reader_device = device_info
             .open_device(api)
             .map_err(|_| HidError::new("Failed to open device (reader handle)"))?;
@@ -556,6 +692,11 @@ impl HidDevicePackage {
             return Ok(false);
         }
 
+        #[cfg(target_os = "macos")]
+        let _thread_handle =
+            self.spawn_reading_thread_nonblocking(device.clone(), path.clone(), descriptor.clone())?;
+
+        #[cfg(not(target_os = "macos"))]
         let _thread_handle =
             self.spawn_reading_thread(reader_device, path.clone(), descriptor.clone())?;
 
