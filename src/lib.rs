@@ -15,16 +15,21 @@ pub mod hid_report_descriptor;
 pub mod logger;
 
 use hid_error::HidError;
-use hid_report_descriptor::{HidReportDescriptor, HidReportInfo};
+use hid_report_descriptor::HidReportDescriptor;
 use once_cell::sync::Lazy;
-use sayo_dummy_device::DummyDevice;
-use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-static HID_INITIALIZED: AtomicBool = AtomicBool::new(false);
+const HID_UNINITIALIZED: u8 = 0;
+const HID_INITIALIZING: u8 = 1;
+const HID_INITIALIZED_STATE: u8 = 2;
+const HID_SHUTTING_DOWN: u8 = 3;
+static HID_STATE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(HID_UNINITIALIZED);
 
 ////////////////////////////////////////////////////////////////////////////////
 // Device filter (cross-platform policy hook)
@@ -57,6 +62,11 @@ pub fn clear_device_filter() {
     }
 }
 
+/// Mint a process-local identifier for a connected physical device.
+pub(crate) fn get_uuid() -> u128 {
+    uuid::Uuid::new_v4().as_u128()
+}
+
 /// Internal: evaluate the installed filter on a descriptor. Returns `true`
 /// when no filter is set so backends accept everything by default.
 #[allow(dead_code)] // currently only consulted by the desktop backend
@@ -75,12 +85,14 @@ pub(crate) fn evaluate_device_filter(desc: &HidReportDescriptor) -> bool {
 ///
 /// Callers should roll the increment back with [`decrement_queue_depth`] if the
 /// enqueue operation fails.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn increment_queue_depth(depth: &AtomicUsize) -> usize {
     depth.fetch_add(1, Ordering::Relaxed).saturating_add(1)
 }
 
 /// Decrement a queue-depth counter without allowing `usize` underflow.
 /// Returns the new depth after the decrement (or `0` if it was already zero).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn decrement_queue_depth(depth: &AtomicUsize) -> usize {
     let mut current = depth.load(Ordering::Relaxed);
     loop {
@@ -235,19 +247,41 @@ impl std::fmt::Debug for Subscription {
 
 /// Initialize the HID backend. Idempotent.
 pub async fn init() -> Result<(), HidError> {
-    if HID_INITIALIZED.load(Ordering::Acquire) {
-        log::debug!("hid_api already initialized, skipping");
-        return Ok(());
+    loop {
+        match HID_STATE.load(Ordering::Acquire) {
+            HID_INITIALIZED_STATE => {
+                log::debug!("hid_api already initialized, skipping");
+                return Ok(());
+            }
+            HID_UNINITIALIZED => {
+                if HID_STATE
+                    .compare_exchange(
+                        HID_UNINITIALIZED,
+                        HID_INITIALIZING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+            HID_INITIALIZING | HID_SHUTTING_DOWN => {
+                futures_timer::Delay::new(std::time::Duration::from_millis(1)).await;
+            }
+            _ => unreachable!(),
+        }
     }
 
     logger::init();
     match platform_hid::init().await {
         Ok(_) => {
-            HID_INITIALIZED.store(true, Ordering::Release);
+            HID_STATE.store(HID_INITIALIZED_STATE, Ordering::Release);
             log::debug!("hid_api init success");
             Ok(())
         }
         Err(e) => {
+            HID_STATE.store(HID_UNINITIALIZED, Ordering::Release);
             log::debug!("hid_api init failed: {:?}", e);
             Err(e)
         }
@@ -263,11 +297,21 @@ pub fn is_supported() -> bool {
 /// associated thread(s). Idempotent. After this returns, [`init`] must be
 /// called again before live device events resume.
 pub fn shutdown() -> Result<(), HidError> {
-    let was_initialized = HID_INITIALIZED.swap(false, Ordering::AcqRel);
-    if !was_initialized {
+    if HID_STATE
+        .compare_exchange(
+            HID_INITIALIZED_STATE,
+            HID_SHUTTING_DOWN,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
         return Ok(());
     }
-    platform_hid::shutdown()
+
+    let result = platform_hid::shutdown();
+    HID_STATE.store(HID_UNINITIALIZED, Ordering::Release);
+    result
 }
 
 /// Prompt the user (where applicable) to grant access to devices matching
@@ -286,21 +330,14 @@ pub async fn request_device(vpid: Vec<(u16, Option<u16>)>) -> Result<Vec<u128>, 
     }
 }
 
-/// Snapshot the currently-connected HID devices, including any registered
-/// dummy/simulated devices so they surface through the normal enumeration.
+/// Snapshot the currently-connected HID devices.
 pub fn device_list() -> Result<Vec<HidDevice>, HidError> {
     let devices = platform_hid::get_device_list().map_err(|e| {
         log::error!("device_list failed: {:?}", e);
         e
     })?;
     log::debug!("device_list success: {} devices", devices.len());
-    let mut list: Vec<HidDevice> = devices.into_iter().map(HidDevice::from).collect();
-    if let Ok(dummies) = DUMMY_DEVICES.read() {
-        for &uuid in dummies.keys() {
-            list.push(HidDevice::from(uuid));
-        }
-    }
-    Ok(list)
+    Ok(devices.into_iter().map(HidDevice::from).collect())
 }
 
 /// Subscribe to device connection / disconnection events. The callback is
@@ -315,21 +352,7 @@ where
     let id = SubscriptionId::next();
     let cb: ConnectionCallback = Arc::new(callback);
     platform_hid::register_connection_listener(id, cb.clone())?;
-    // Mirror platform behavior for dummies: remember the listener (so future
-    // register/unregister_dummy fire it) and immediately report every
-    // already-registered dummy as connected.
-    if let Ok(mut map) = DUMMY_CONN_LISTENERS.write() {
-        map.insert(id, cb.clone());
-    }
-    if let Ok(dummies) = DUMMY_DEVICES.read() {
-        for &uuid in dummies.keys() {
-            cb(DeviceId(uuid), true);
-        }
-    }
     Ok(Subscription::new(id, move |id| {
-        if let Ok(mut map) = DUMMY_CONN_LISTENERS.write() {
-            map.remove(&id);
-        }
         if let Err(e) = platform_hid::unregister_connection_listener(id) {
             log::debug!("unregister_connection_listener failed: {:?}", e);
         }
@@ -382,69 +405,35 @@ impl HidDevice {
     }
 
     pub fn available(&self) -> bool {
-        let uuid = self.id.as_u128();
-        if is_dummy(uuid) {
-            return true;
-        }
-        platform_hid::available(uuid)
+        platform_hid::available(self.id.as_u128())
     }
 
     pub fn vid(&self) -> Result<u16, HidError> {
-        let uuid = self.id.as_u128();
-        if let Some(v) = dummy_read(uuid, |d| d.vid()) {
-            return Ok(v);
-        }
-        platform_hid::vid(uuid)
+        platform_hid::vid(self.id.as_u128())
     }
 
     pub fn pid(&self) -> Result<u16, HidError> {
-        let uuid = self.id.as_u128();
-        if let Some(v) = dummy_read(uuid, |d| d.pid()) {
-            return Ok(v);
-        }
-        platform_hid::pid(uuid)
+        platform_hid::pid(self.id.as_u128())
     }
 
     pub fn get_serial_number(&self) -> Result<Option<String>, HidError> {
-        let uuid = self.id.as_u128();
-        if let Some(s) = dummy_read(uuid, |d| d.serial_number()) {
-            return Ok(s);
-        }
-        platform_hid::get_serial_number(uuid)
+        platform_hid::get_serial_number(self.id.as_u128())
     }
 
     pub fn get_product_name(&self) -> Result<Option<String>, HidError> {
-        let uuid = self.id.as_u128();
-        if let Some(s) = dummy_read(uuid, |d| d.product_name()) {
-            return Ok(s);
-        }
-        platform_hid::get_product_name(uuid)
+        platform_hid::get_product_name(self.id.as_u128())
     }
 
     pub fn get_collections(&self) -> Result<HidReportDescriptor, HidError> {
-        let uuid = self.id.as_u128();
-        if let Some(desc) = dummy_read(uuid, |d| dummy_descriptor(d.meta())) {
-            return Ok(desc);
-        }
-        platform_hid::get_collections(uuid)
+        platform_hid::get_collections(self.id.as_u128())
     }
 
     pub async fn send_report(&self, data: Vec<u8>) -> Result<(), HidError> {
-        let uuid = self.id.as_u128();
-        if is_dummy(uuid) {
-            dummy_handle_report(uuid, &data);
-            return Ok(());
-        }
-        platform_hid::send_report(uuid, data).await.map(|_| ())
+        platform_hid::send_report(self.id.as_u128(), data).await.map(|_| ())
     }
 
     pub async fn send_report_slice(&self, data: &[u8]) -> Result<(), HidError> {
-        let uuid = self.id.as_u128();
-        if is_dummy(uuid) {
-            dummy_handle_report(uuid, data);
-            return Ok(());
-        }
-        platform_hid::send_report(uuid, data.to_vec())
+        platform_hid::send_report(self.id.as_u128(), data.to_vec())
             .await
             .map(|_| ())
     }
@@ -464,12 +453,6 @@ impl HidDevice {
     where
         F: Fn(f64) + Send + Sync + 'static,
     {
-        let uuid = self.id.as_u128();
-        if is_dummy(uuid) {
-            // The simulated device has no firmware path; report full progress.
-            on_progress(1.0);
-            return Ok(firmware.len());
-        }
         let mut buffer = firmware;
         let cb: ProgressCallback = Arc::new(on_progress);
         platform_hid::send_firmware(
@@ -499,21 +482,7 @@ impl HidDevice {
         let uuid = self.id.as_u128();
         let cb: ReportCallback = Arc::new(callback);
         platform_hid::register_report_listener(uuid, id, cb.clone())?;
-        // Always mirror the listener into the dummy table so a device that
-        // becomes a dummy AFTER this subscription is installed (open-then-enable)
-        // still receives the simulated responses. Harmless for real devices.
-        if let Ok(mut map) = DUMMY_REPORT_LISTENERS.write() {
-            map.entry(uuid).or_default().insert(id, cb);
-        }
         Ok(Subscription::new(id, move |id| {
-            if let Ok(mut map) = DUMMY_REPORT_LISTENERS.write() {
-                if let Some(set) = map.get_mut(&uuid) {
-                    set.remove(&id);
-                    if set.is_empty() {
-                        map.remove(&uuid);
-                    }
-                }
-            }
             if let Err(e) = platform_hid::unregister_report_listener(uuid, id) {
                 log::debug!("unregister_report_listener failed: {:?}", e);
             }
@@ -521,149 +490,7 @@ impl HidDevice {
     }
 
     pub fn has_report_id(&self, report_id: u8) -> Result<bool, HidError> {
-        let uuid = self.id.as_u128();
-        if let Some(b) = dummy_read(uuid, |d| d.has_report_id(report_id)) {
-            return Ok(b);
-        }
-        platform_hid::has_report_id(uuid, report_id)
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// Dummy / simulated devices
-////////////////////////////////////////////////////////////////////////////////
-//
-// A dummy device is simulated entirely in this cross-platform layer: each public
-// seam above checks the dummy registry first and, on a hit, serves the request
-// from a `sayo_dummy_device::DummyDevice` instead of delegating to
-// `platform_hid`. This keeps the simulation identical on every backend
-// (node/web/ipc) and lets the device flow through the normal stack
-// (device_list / openDeviceByUuid / connection events / initialize) with no
-// special-casing above hid_rs.
-
-/// UUIDs `< RESERVED_UUID_MAX` are reserved for dummy devices (id == model_code,
-/// which is a u16). Real device uuids are minted via [`get_uuid`] strictly
-/// outside this range, so [`is_dummy`] can never misclassify a real device.
-pub const RESERVED_UUID_MAX: u128 = 0x1_0000;
-
-static DUMMY_DEVICES: Lazy<RwLock<HashMap<u128, DummyDevice>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-/// Report listeners for dummy uuids. Populated by EVERY `on_report` (not only
-/// dummies) so a device that becomes a dummy AFTER its report subscription is
-/// installed still receives responses — see `on_report`.
-static DUMMY_REPORT_LISTENERS: Lazy<RwLock<HashMap<u128, HashMap<SubscriptionId, ReportCallback>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-static DUMMY_CONN_LISTENERS: Lazy<RwLock<HashMap<SubscriptionId, ConnectionCallback>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-
-/// Mint a uuid for a real device, excluding the reserved dummy range. Platform
-/// backends call this instead of `Uuid::new_v4()` directly.
-pub(crate) fn get_uuid() -> u128 {
-    loop {
-        let id = uuid::Uuid::new_v4().as_u128();
-        if id >= RESERVED_UUID_MAX {
-            return id;
-        }
-    }
-}
-
-fn is_dummy(uuid: u128) -> bool {
-    DUMMY_DEVICES
-        .read()
-        .map(|m| m.contains_key(&uuid))
-        .unwrap_or(false)
-}
-
-/// Read-only access to a registered dummy, applying `f` while the registry lock
-/// is held. Returns `None` if no dummy is registered for `uuid`.
-fn dummy_read<T>(uuid: u128, f: impl FnOnce(&DummyDevice) -> T) -> Option<T> {
-    DUMMY_DEVICES.read().ok().and_then(|m| m.get(&uuid).map(f))
-}
-
-fn dummy_descriptor(meta: &sayo_dummy_device::DeviceMeta) -> HidReportDescriptor {
-    fn map(v: &[sayo_dummy_device::ReportInfoMeta]) -> Vec<HidReportInfo> {
-        v.iter()
-            .map(|r| HidReportInfo {
-                report_id: r.report_id,
-                size: r.size,
-                usages: r.usages.clone(),
-            })
-            .collect()
-    }
-    HidReportDescriptor {
-        input_reports: map(&meta.input_reports),
-        output_reports: map(&meta.output_reports),
-        feature_reports: map(&meta.feature_reports),
-    }
-}
-
-/// Feed an outgoing request to the dummy engine and deliver its response reports
-/// back through the dummy report listeners (the same path real input reports
-/// take). The registry write lock is released before listeners fire.
-fn dummy_handle_report(uuid: u128, data: &[u8]) {
-    let responses = {
-        let Ok(mut map) = DUMMY_DEVICES.write() else {
-            return;
-        };
-        let Some(dev) = map.get_mut(&uuid) else {
-            return;
-        };
-        dev.handle_report(data)
-    };
-    for r in responses {
-        notify_dummy_report(uuid, r);
-    }
-}
-
-fn notify_dummy_report(uuid: u128, report: Vec<u8>) {
-    let listeners: Vec<ReportCallback> = match DUMMY_REPORT_LISTENERS.read() {
-        Ok(map) => match map.get(&uuid) {
-            Some(set) => set.values().cloned().collect(),
-            None => return,
-        },
-        Err(_) => return,
-    };
-    let shared: Arc<[u8]> = Arc::from(report);
-    for cb in listeners {
-        cb(DeviceId(uuid), shared.clone());
-    }
-}
-
-fn notify_dummy_connection(uuid: u128, connected: bool) {
-    let listeners: Vec<ConnectionCallback> = match DUMMY_CONN_LISTENERS.read() {
-        Ok(map) => map.values().cloned().collect(),
-        Err(_) => return,
-    };
-    for cb in listeners {
-        cb(DeviceId(uuid), connected);
-    }
-}
-
-/// Register a simulated device from a fixture JSON. Returns its uuid
-/// (== `model_code`) and fires connection listeners so it surfaces like a
-/// freshly-plugged device. Safe to call from any backend.
-pub fn register_dummy(fixture_json: &str) -> Result<u128, HidError> {
-    let dummy = DummyDevice::from_fixture_json(fixture_json).map_err(HidError::Other)?;
-    let uuid = dummy.uuid();
-    {
-        let mut map = DUMMY_DEVICES
-            .write()
-            .map_err(|_| HidError::lock_poisoned("DUMMY_DEVICES"))?;
-        map.insert(uuid, dummy);
-    }
-    notify_dummy_connection(uuid, true);
-    Ok(uuid)
-}
-
-/// Remove a previously-registered dummy and fire `connected = false`.
-pub fn unregister_dummy(uuid: u128) {
-    let removed = DUMMY_DEVICES
-        .write()
-        .ok()
-        .map(|mut m| m.remove(&uuid).is_some())
-        .unwrap_or(false);
-    if removed {
-        notify_dummy_connection(uuid, false);
+        platform_hid::has_report_id(self.id.as_u128(), report_id)
     }
 }
 

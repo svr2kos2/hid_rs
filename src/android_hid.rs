@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc::{sync_channel, SyncSender, TrySendError},
-    Arc, RwLock,
+    Arc, Mutex, RwLock,
 };
 
 /// Per-device bounded report queue capacity (drop newest on overflow).
@@ -54,6 +54,7 @@ struct ReportChannel {
 }
 static REPORT_CHANNELS: Lazy<RwLock<HashMap<u128, ReportChannel>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
+static REPORT_SETUP_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 fn log_enter(name: &str) {
     log::trace!("ENTER {}", name);
@@ -114,6 +115,24 @@ pub(crate) async fn init() -> Result<(), HidError> {
 /// Stop the connection-poller thread (if running). Idempotent.
 pub(crate) fn shutdown() -> Result<(), HidError> {
     POLLER_ABORT.store(true, Ordering::SeqCst);
+    if let Ok(mut devices) = DEVICE_SET.write() {
+        devices.clear();
+    }
+    if let Ok(mut listeners) = DEVICE_CONNECTION_LISTENERS.write() {
+        listeners.clear();
+    }
+    if let Ok(mut listeners) = DEVICE_REPORT_LISTENERS.write() {
+        listeners.clear();
+    }
+    if let Ok(mut readers) = REPORT_READERS.write() {
+        readers.clear();
+    }
+    if let Ok(mut flags) = REPORT_ABORT_FLAGS.write() {
+        flags.clear();
+    }
+    if let Ok(mut channels) = REPORT_CHANNELS.write() {
+        channels.clear();
+    }
     Ok(())
 }
 
@@ -248,7 +267,14 @@ pub(crate) fn register_connection_listener(
 
             loop {
                 if POLLER_ABORT.load(Ordering::Relaxed) {
-                    break;
+                    let has_listeners = DEVICE_CONNECTION_LISTENERS
+                        .read()
+                        .map(|listeners| !listeners.is_empty())
+                        .unwrap_or(false);
+                    if !has_listeners {
+                        break;
+                    }
+                    POLLER_ABORT.store(false, Ordering::Release);
                 }
                 let new_list = get_device_list().unwrap_or_default();
                 let new_set: HashSet<u128> = new_list.into_iter().collect();
@@ -281,13 +307,23 @@ pub(crate) fn register_connection_listener(
                     for id in added.iter() {
                         log::debug!("Device connected: {}", uuid::Uuid::from_u128(*id));
                         for cb in &listeners {
-                            cb(DeviceId(*id), true);
+                            let result = std::panic::catch_unwind(
+                                std::panic::AssertUnwindSafe(|| cb(DeviceId(*id), true)),
+                            );
+                            if result.is_err() {
+                                log::error!("Android connection callback panicked");
+                            }
                         }
                     }
                     for id in removed.iter() {
                         log::debug!("Device disconnected: {}", uuid::Uuid::from_u128(*id));
                         for cb in &listeners {
-                            cb(DeviceId(*id), false);
+                            let result = std::panic::catch_unwind(
+                                std::panic::AssertUnwindSafe(|| cb(DeviceId(*id), false)),
+                            );
+                            if result.is_err() {
+                                log::error!("Android connection callback panicked");
+                            }
                         }
                     }
                 }
@@ -626,7 +662,12 @@ fn notify_report_arrive(uuid: u128, shared: Arc<[u8]>) {
         Err(_) => return,
     };
     for cb in listeners {
-        cb(DeviceId(uuid), shared.clone());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cb(DeviceId(uuid), shared.clone());
+        }));
+        if result.is_err() {
+            log::error!("Android report callback panicked for device {uuid:032x}");
+        }
     }
 }
 
@@ -636,6 +677,9 @@ pub(crate) fn register_report_listener(
     callback: ReportCallback,
 ) -> Result<(), HidError> {
     let _fn_logger = FnLogger::new("android_hid::register_report_listener");
+    let _setup_guard = REPORT_SETUP_LOCK
+        .lock()
+        .map_err(|_| HidError::lock_poisoned("REPORT_SETUP_LOCK"))?;
     log::debug!(
         "register_report_listener called for {:?}",
         uuid::Uuid::from_u128(uuid)
@@ -912,6 +956,9 @@ pub(crate) fn register_report_listener(
 
 pub(crate) fn unregister_report_listener(uuid: u128, id: SubscriptionId) -> Result<(), HidError> {
     let _fn_logger = FnLogger::new("android_hid::unregister_report_listener");
+    let _setup_guard = REPORT_SETUP_LOCK
+        .lock()
+        .map_err(|_| HidError::lock_poisoned("REPORT_SETUP_LOCK"))?;
     let mut should_stop = false;
     {
         let mut map = DEVICE_REPORT_LISTENERS

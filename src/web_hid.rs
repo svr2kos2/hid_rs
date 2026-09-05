@@ -6,7 +6,6 @@ use crate::{
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use js_sys::{wasm_bindgen, Function, Promise, Uint8Array};
-use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::JsFuture;
@@ -43,7 +42,7 @@ pub(crate) fn pid(uuid: u128) -> Result<u16, HidError> {
     })
 }
 
-pub(crate) fn get_serial_number(uuid: u128) -> Result<Option<String>, HidError> {
+pub(crate) fn get_serial_number(_uuid: u128) -> Result<Option<String>, HidError> {
     Ok(None)
 }
 
@@ -63,8 +62,20 @@ pub(crate) fn is_supported() -> bool {
     }
 }
 
-/// WebHID has no background poller, so shutdown is a no-op.
 pub(crate) fn shutdown() -> Result<(), HidError> {
+    if let Ok(api) = get_api() {
+        api.set_onconnect(None);
+        api.set_ondisconnect(None);
+    }
+    CONNECTION_HANDLERS.with(|handlers| handlers.borrow_mut().take());
+    DEVICE_LIST.with(|list| {
+        for package in list.borrow().values() {
+            package.device.set_oninputreport(None);
+        }
+    });
+    REPORT_HANDLERS.with(|handlers| handlers.borrow_mut().clear());
+    DEVICE_LIST.with(|list| list.borrow_mut().clear());
+    DEVICE_REPORT_LISTENERS.with(|listeners| listeners.borrow_mut().clear());
     Ok(())
 }
 
@@ -121,9 +132,9 @@ pub(crate) async fn init() -> Result<(), HidError> {
     api.set_onconnect(Some(connect.as_ref().unchecked_ref()));
     api.set_ondisconnect(Some(disconnect.as_ref().unchecked_ref()));
 
-    // Prevent closures from being dropped
-    connect.forget();
-    disconnect.forget();
+    CONNECTION_HANDLERS.with(|handlers| {
+        *handlers.borrow_mut() = Some((connect, disconnect));
+    });
 
     Ok(())
 }
@@ -324,17 +335,18 @@ pub(crate) async fn send_firmware(
 
     let send_fun = Function::new_with_args("device, firmware", JS_CODE);
 
-    firmware.push(check_sum);
-    firmware.push(encrypt);
-    firmware.push(write_data_cmd);
-    firmware.push(size_addr);
-    firmware.push(big_endian);
-    firmware.push(err_for_size);
+    let mut payload = firmware.clone();
+    payload.push(check_sum);
+    payload.push(encrypt);
+    payload.push(write_data_cmd);
+    payload.push(size_addr);
+    payload.push(big_endian);
+    payload.push(err_for_size);
 
     let promise = match send_fun.call2(
         &JsValue::NULL,
         &device,
-        &Uint8Array::from(firmware.as_slice()),
+        &Uint8Array::from(payload.as_slice()),
     ) {
         Ok(p) => Promise::from(p),
         Err(err) => {
@@ -351,7 +363,7 @@ pub(crate) async fn send_firmware(
     let res = match JsFuture::from(promise).await {
         Ok(success) => {
             if success.as_bool().unwrap_or(false) {
-                Ok(firmware.len())
+                Ok(payload.len())
             } else {
                 Err(HidError::Io("failed to send firmware".to_string()))
             }
@@ -404,6 +416,8 @@ thread_local! {
     static DEVICE_LIST: RefCell<HashMap<u128, HidDevicePackage>> = RefCell::new(HashMap::new());
     static DEVICE_CONNECTION_LISTENERS: RefCell<HashMap<SubscriptionId, ConnectionCallback>> = RefCell::new(HashMap::new());
     static DEVICE_REPORT_LISTENERS: RefCell<HashMap<u128, HashMap<SubscriptionId, ReportCallback>>> = RefCell::new(HashMap::new());
+    static CONNECTION_HANDLERS: RefCell<Option<(Closure<dyn Fn(JsValue)>, Closure<dyn Fn(JsValue)>)>> = RefCell::new(None);
+    static REPORT_HANDLERS: RefCell<HashMap<u128, Closure<dyn Fn(JsValue)>>> = RefCell::new(HashMap::new());
 }
 
 ////////////////////////////////////////
@@ -424,7 +438,12 @@ fn notify_connection_changed(uuid: u128, connected: bool) {
     let listeners: Vec<ConnectionCallback> = DEVICE_CONNECTION_LISTENERS
         .with(|listeners| listeners.borrow().values().cloned().collect());
     for listener in listeners {
-        listener(DeviceId(uuid), connected);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            listener(DeviceId(uuid), connected);
+        }));
+        if result.is_err() {
+            log::error!("WebHID connection callback panicked for device {uuid:032x}");
+        }
     }
 }
 
@@ -439,7 +458,12 @@ fn notify_report_arrive(uuid: u128, report: Vec<u8>) {
     }
     let shared: Arc<[u8]> = Arc::from(report.into_boxed_slice());
     for listener in listeners {
-        listener(DeviceId(uuid), shared.clone());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            listener(DeviceId(uuid), shared.clone());
+        }));
+        if result.is_err() {
+            log::error!("WebHID report callback panicked for device {uuid:032x}");
+        }
     }
 }
 
@@ -583,9 +607,7 @@ async fn add_device(device: HidDevice) -> Result<Option<u128>, HidError> {
     }) as Box<dyn Fn(JsValue)>);
 
     device.set_oninputreport(Some(on_report.as_ref().unchecked_ref()));
-    on_report.forget();
 
-    // Mint outside the reserved dummy-device range.
     let uuid = crate::get_uuid();
     let report_info = collections
         .input_reports
@@ -602,14 +624,26 @@ async fn add_device(device: HidDevice) -> Result<Option<u128>, HidError> {
             },
         );
     });
+    REPORT_HANDLERS.with(|handlers| {
+        handlers.borrow_mut().insert(uuid, on_report);
+    });
     notify_connection_changed(uuid, true);
     Ok(Some(uuid))
 }
 
 async fn remove_device(uuid: u128) {
     notify_connection_changed(uuid, false);
+    let device = DEVICE_LIST.with(|list| {
+        list.borrow().get(&uuid).map(|package| package.device.clone())
+    });
+    if let Some(device) = device {
+        device.set_oninputreport(None);
+    }
     DEVICE_LIST.with(|list| {
         list.borrow_mut().remove(&uuid);
+    });
+    REPORT_HANDLERS.with(|handlers| {
+        handlers.borrow_mut().remove(&uuid);
     });
     DEVICE_REPORT_LISTENERS.with(|listeners| {
         listeners.borrow_mut().remove(&uuid);

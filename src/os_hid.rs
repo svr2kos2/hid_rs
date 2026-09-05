@@ -90,7 +90,13 @@ pub(crate) async fn init() -> Result<(), HidError> {
     }
     SHUTDOWN.store(false, Ordering::SeqCst);
 
-    let api = create_api()?;
+    let api = match create_api() {
+        Ok(api) => api,
+        Err(err) => {
+            INIT_DONE.store(false, Ordering::SeqCst);
+            return Err(err);
+        }
+    };
     HIDAPI
         .lock()
         .map_err(|_| HidError::lock_poisoned("HIDAPI"))?
@@ -108,7 +114,13 @@ pub(crate) async fn init() -> Result<(), HidError> {
         update_device_list(converted_vpids)
     }
 
-    poll_devices()?;
+    if let Err(err) = poll_devices() {
+        if let Ok(mut hidapi) = HIDAPI.lock() {
+            hidapi.take();
+        }
+        INIT_DONE.store(false, Ordering::SeqCst);
+        return Err(err);
+    }
     let handle = std::thread::spawn(move || {
         while !SHUTDOWN.load(Ordering::Relaxed) {
             if let Err(e) = poll_devices() {
@@ -144,6 +156,31 @@ pub(crate) fn shutdown() -> Result<(), HidError> {
         if let Err(e) = h.join() {
             log::warn!("poll thread join failed: {e:?}");
         }
+    }
+
+    let packages = DEVICE_LIST
+        .write()
+        .map_err(|_| HidError::lock_poisoned("DEVICE_LIST"))?
+        .drain()
+        .collect::<Vec<_>>();
+    let mut removed = Vec::with_capacity(packages.len());
+    for (uuid, package) in packages {
+        if let Ok(package) = package.lock() {
+            package.abort();
+            removed.push((uuid, package.serial_number.clone()));
+        }
+    }
+    if let Ok(mut serials) = SERIAL_NUMBER_TO_UUID.write() {
+        serials.clear();
+    }
+    if let Ok(mut listeners) = DEVICE_REPORT_LISTENERS.write() {
+        listeners.clear();
+    }
+    for (uuid, _) in removed {
+        notify_connection_changed(uuid, false);
+    }
+    if let Ok(mut api) = HIDAPI.lock() {
+        api.take();
     }
     INIT_DONE.store(false, Ordering::SeqCst);
     Ok(())
@@ -334,7 +371,8 @@ pub(crate) fn unregister_report_listener(uuid: u128, id: SubscriptionId) -> Resu
 // Global variables
 ////////////////////////////////////////
 static HIDAPI: Lazy<Mutex<Option<HidApi>>> = Lazy::new(|| Mutex::new(None));
-static VID_PID_LIST: Lazy<Mutex<VidPidFilters>> = Lazy::new(|| Mutex::new(vec![(0x8089, None)]));
+static VID_PID_LIST: Lazy<Mutex<VidPidFilters>> =
+    Lazy::new(|| Mutex::new(vec![(0x3710, Some(0x2507)), (0x8089, None)]));
 static DEVICE_LIST: Lazy<RwLock<HashMap<u128, Arc<Mutex<HidDevicePackage>>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 static SERIAL_NUMBER_TO_UUID: Lazy<RwLock<HashMap<String, u128>>> =
@@ -404,13 +442,14 @@ impl HidDevicePackage {
             .map(|report| report.report_id)
             .collect();
 
-        // Set blocking mode for a dedicated reader handle
+        // Use non-blocking reads so abort/shutdown can reliably stop the
+        // reader without waiting for an OS-level read timeout.
         reader_device
-            .set_blocking_mode(true)
-            .map_err(|_| HidError::new("Failed to set blocking mode"))?;
+            .set_blocking_mode(false)
+            .map_err(|_| HidError::new("Failed to set non-blocking mode"))?;
 
         log::debug!(
-            "{:?} {:2X?} Set blocking mode to true",
+            "{:?} {:2X?} Set blocking mode to false",
             device_path,
             report_ids
         );
@@ -736,7 +775,12 @@ fn notify_connection_changed(uuid: u128, connected: bool) {
     };
 
     for listener in listeners {
-        listener(DeviceId(uuid), connected);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            listener(DeviceId(uuid), connected);
+        }));
+        if result.is_err() {
+            log::error!("HID connection callback panicked for device {uuid:032x}");
+        }
     }
 }
 
@@ -755,7 +799,12 @@ fn notify_report_arrive(uuid: u128, shared: Arc<[u8]>) {
     // Caller already wrapped the packet in an Arc; just clone the handle
     // for each listener.
     for listener in listeners {
-        listener(DeviceId(uuid), shared.clone());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            listener(DeviceId(uuid), shared.clone());
+        }));
+        if result.is_err() {
+            log::error!("HID report callback panicked for device {uuid:032x}");
+        }
     }
 }
 
@@ -833,7 +882,6 @@ fn update_device_list(vendor_ids: Vec<(u16, u16)>) -> Result<(), HidError> {
             None => {
                 // New device
                 // log::debug!("New device found");
-                // Mint outside the reserved dummy-device range.
                 let uuid = crate::get_uuid();
 
                 // Per-device bounded channel: reader threads `try_send` reports
@@ -859,7 +907,7 @@ fn update_device_list(vendor_ids: Vec<(u16, u16)>) -> Result<(), HidError> {
                     });
                 }
 
-                let mut device_pack = HidDevicePackage {
+                let device_pack = Arc::new(Mutex::new(HidDevicePackage {
                     uuid,
                     serial_number: serial_number.to_string(),
                     paths: HashSet::new(),
@@ -871,30 +919,40 @@ fn update_device_list(vendor_ids: Vec<(u16, u16)>) -> Result<(), HidError> {
                     queue_depth,
                     queue_warned,
                     reader_count: Arc::new(AtomicUsize::new(0)),
-                };
-                match device_pack.try_add(device_info, api) {
-                    Ok(true) => log::debug!("New device added"),
-                    Ok(false) => continue, // Rejected by device filter
-                    Err(err) => {
-                        log::debug!("Failed to add device: {:?}", err);
-                        continue;
-                    }
-                }
+                }));
 
                 {
                     let mut device_list_binding = DEVICE_LIST
                         .write()
                         .map_err(|_| HidError::lock_poisoned("DEVICE_LIST"))?;
-                    device_list_binding.insert(uuid, Arc::new(Mutex::new(device_pack)));
+                    device_list_binding.insert(uuid, device_pack.clone());
                 }
-
                 {
                     let mut serial_number_to_uuid_binding = SERIAL_NUMBER_TO_UUID
                         .write()
                         .map_err(|_| HidError::lock_poisoned("SERIAL_NUMBER_TO_UUID"))?;
                     serial_number_to_uuid_binding.insert(serial_number.to_string(), uuid);
                 }
-                notify_connection_changed(uuid, true);
+
+                let add_result = device_pack
+                    .lock()
+                    .map_err(|_| HidError::lock_poisoned("HidDevicePackage"))
+                    .and_then(|mut package| package.try_add(device_info, api));
+                match add_result {
+                    Ok(true) => log::debug!("New device added"),
+                    Ok(false) => {
+                        discard_device(uuid, &device_pack);
+                        continue;
+                    }
+                    Err(err) => {
+                        log::debug!("Failed to add device: {:?}", err);
+                        discard_device(uuid, &device_pack);
+                        continue;
+                    }
+                }
+                if available(uuid) {
+                    notify_connection_changed(uuid, true);
+                }
             }
         }
     }
@@ -903,6 +961,21 @@ fn update_device_list(vendor_ids: Vec<(u16, u16)>) -> Result<(), HidError> {
 
     //log::debug!("Device list updated---------------------------------");
     Ok(())
+}
+
+fn discard_device(uuid: u128, package: &Arc<Mutex<HidDevicePackage>>) {
+    if let Ok(mut devices) = DEVICE_LIST.write() {
+        devices.remove(&uuid);
+    }
+    if let Ok(guard) = package.lock() {
+        guard.abort();
+        if let Ok(mut serials) = SERIAL_NUMBER_TO_UUID.write() {
+            serials.remove(&guard.serial_number);
+        }
+    }
+    if let Ok(mut listeners) = DEVICE_REPORT_LISTENERS.write() {
+        listeners.remove(&uuid);
+    }
 }
 
 fn remove_device(uuid: u128) -> Result<bool, HidError> {
@@ -932,6 +1005,9 @@ fn remove_device(uuid: u128) -> Result<bool, HidError> {
         serial_number_to_uuid_binding.remove(&serial_number);
     } else {
         log::debug!("Failed to acquire serial number to uuid lock for cleanup");
+    }
+    if let Ok(mut listeners) = DEVICE_REPORT_LISTENERS.write() {
+        listeners.remove(&uuid);
     }
     log::debug!("Device removed");
     notify_connection_changed(uuid, false);
