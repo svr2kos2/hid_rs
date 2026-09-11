@@ -18,9 +18,9 @@ use hid_error::HidError;
 use hid_report_descriptor::HidReportDescriptor;
 use once_cell::sync::Lazy;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -28,8 +28,7 @@ const HID_UNINITIALIZED: u8 = 0;
 const HID_INITIALIZING: u8 = 1;
 const HID_INITIALIZED_STATE: u8 = 2;
 const HID_SHUTTING_DOWN: u8 = 3;
-static HID_STATE: std::sync::atomic::AtomicU8 =
-    std::sync::atomic::AtomicU8::new(HID_UNINITIALIZED);
+static HID_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(HID_UNINITIALIZED);
 
 ////////////////////////////////////////////////////////////////////////////////
 // Device filter (cross-platform policy hook)
@@ -330,6 +329,14 @@ pub async fn request_device(vpid: Vec<(u16, Option<u16>)>) -> Result<Vec<u128>, 
     }
 }
 
+/// Replace the VID/PID allow-list used for already-authorized devices.
+pub fn set_device_filters(vpid: Vec<(u16, Option<u16>)>) {
+    #[cfg(target_arch = "wasm32")]
+    platform_hid::set_device_filters(vpid);
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = vpid;
+}
+
 /// Snapshot the currently-connected HID devices.
 pub fn device_list() -> Result<Vec<HidDevice>, HidError> {
     let devices = platform_hid::get_device_list().map_err(|e| {
@@ -429,7 +436,9 @@ impl HidDevice {
     }
 
     pub async fn send_report(&self, data: Vec<u8>) -> Result<(), HidError> {
-        platform_hid::send_report(self.id.as_u128(), data).await.map(|_| ())
+        platform_hid::send_report(self.id.as_u128(), data)
+            .await
+            .map(|_| ())
     }
 
     pub async fn send_report_slice(&self, data: &[u8]) -> Result<(), HidError> {

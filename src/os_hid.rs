@@ -24,7 +24,7 @@ const REPORT_QUEUE_CAP: usize = 4096;
 /// crosses this we log once; the warning re-arms after depth drops back
 /// below the threshold.
 const REPORT_QUEUE_WARN_THRESHOLD: usize = 256;
-const DEVICE_POLL_INTERVAL_MS: u64 = 1000;
+const DEVICE_POLL_INTERVAL_MS: u64 = 500;
 const READ_RETRY_DELAY_MS: u64 = 500;
 const READ_BUFFER_SIZE: usize = 1024;
 const REPORT_DESCRIPTOR_BUFFER_SIZE: usize = 1024;
@@ -69,7 +69,8 @@ pub(crate) fn pid(uuid: u128) -> Result<u16, HidError> {
 
 pub(crate) fn get_serial_number(uuid: u128) -> Result<Option<String>, HidError> {
     get_device_by_uuid(uuid, |device| {
-        device.get_device_info()
+        device
+            .get_device_info()
             .map(|info| info.serial_number().map(|s| s.to_string()))
             .map_err(|_| HidError::new("Failed to get serial number"))
     })
@@ -371,8 +372,7 @@ pub(crate) fn unregister_report_listener(uuid: u128, id: SubscriptionId) -> Resu
 // Global variables
 ////////////////////////////////////////
 static HIDAPI: Lazy<Mutex<Option<HidApi>>> = Lazy::new(|| Mutex::new(None));
-static VID_PID_LIST: Lazy<Mutex<VidPidFilters>> =
-    Lazy::new(|| Mutex::new(vec![(0x3710, Some(0x2507)), (0x8089, None)]));
+static VID_PID_LIST: Lazy<Mutex<VidPidFilters>> = Lazy::new(|| Mutex::new(vec![(0x8089, None)]));
 static DEVICE_LIST: Lazy<RwLock<HashMap<u128, Arc<Mutex<HidDevicePackage>>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 static SERIAL_NUMBER_TO_UUID: Lazy<RwLock<HashMap<String, u128>>> =
@@ -530,8 +530,8 @@ impl HidDevicePackage {
                 }
             }
 
-            // Decrement the reader-count for this package. 
-            // If we were the last reader, the whole device is now fully disconnected and should be removed from the global list; 
+            // Decrement the reader-count for this package.
+            // If we were the last reader, the whole device is now fully disconnected and should be removed from the global list;
             // otherwise leave the package alive so sibling interfaces can keep operating.
             let remaining = reader_count
                 .fetch_sub(1, Ordering::Relaxed)
@@ -706,10 +706,11 @@ impl HidDevicePackage {
         }
 
         #[cfg(target_os = "macos")]
-        let device =
-            Arc::new(Mutex::new(device_info.open_device(api).map_err(|_| {
-                HidError::new("Failed to open device")
-            })?));
+        let device = Arc::new(Mutex::new(
+            device_info
+                .open_device(api)
+                .map_err(|_| HidError::new("Failed to open device"))?,
+        ));
 
         #[cfg(not(target_os = "macos"))]
         let device =
@@ -732,8 +733,11 @@ impl HidDevicePackage {
         }
 
         #[cfg(target_os = "macos")]
-        let _thread_handle =
-            self.spawn_reading_thread_nonblocking(device.clone(), path.clone(), descriptor.clone())?;
+        let _thread_handle = self.spawn_reading_thread_nonblocking(
+            device.clone(),
+            path.clone(),
+            descriptor.clone(),
+        )?;
 
         #[cfg(not(target_os = "macos"))]
         let _thread_handle =
@@ -897,7 +901,8 @@ fn update_device_list(vendor_ids: Vec<(u16, u16)>) -> Result<(), HidError> {
                     std::thread::spawn(move || {
                         log::debug!("dispatcher thread running for device {uuid:032x}");
                         while let Ok(shared) = rx.recv() {
-                            let remaining_depth = crate::decrement_queue_depth(queue_depth.as_ref());
+                            let remaining_depth =
+                                crate::decrement_queue_depth(queue_depth.as_ref());
                             if remaining_depth < REPORT_QUEUE_WARN_THRESHOLD {
                                 queue_warned.store(false, Ordering::Relaxed);
                             }

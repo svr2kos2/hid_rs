@@ -3,15 +3,18 @@ use crate::{
     hid_report_descriptor::{HidReportDescriptor, HidReportInfo},
     ConnectionCallback, DeviceId, ProgressCallback, ReportCallback, SubscriptionId,
 };
-use std::{cell::RefCell, collections::HashMap, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    sync::Arc,
+};
 
 use js_sys::{wasm_bindgen, Function, Promise, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    HidConnectionEvent, HidDevice, HidDeviceFilter, HidDeviceRequestOptions,
-    HidInputReportEvent,
+    HidConnectionEvent, HidDevice, HidDeviceFilter, HidDeviceRequestOptions, HidInputReportEvent,
 };
 
 ////////////////////////////////////////
@@ -19,6 +22,8 @@ use web_sys::{
 ////////////////////////////////////////
 const SUPPORTED_REPORT_IDS: [u8; 3] = [0x02, 0x21, 0x22];
 const DEVICE_OPEN_DELAY_MS: u32 = 500;
+const DEVICE_SYNC_INTERVAL_MS: i32 = 500;
+const DEFAULT_VENDOR_ID: u16 = 0x8089;
 
 ////////////////////////////////////////
 // Interfaces
@@ -62,7 +67,17 @@ pub(crate) fn is_supported() -> bool {
     }
 }
 
+/// Replace the VID/PID allow-list used when adopting already-authorized HID
+/// devices. An empty list intentionally disables automatic device adoption.
+pub(crate) fn set_device_filters(vendor_ids: Vec<(u16, Option<u16>)>) {
+    ACCEPTED_FILTERS.with(|filters| {
+        *filters.borrow_mut() = vendor_ids;
+    });
+    FILTERS_CONFIGURED.with(|configured| configured.set(true));
+}
+
 pub(crate) fn shutdown() -> Result<(), HidError> {
+    stop_device_sync_timer();
     if let Ok(api) = get_api() {
         api.set_onconnect(None);
         api.set_ondisconnect(None);
@@ -75,6 +90,7 @@ pub(crate) fn shutdown() -> Result<(), HidError> {
     });
     REPORT_HANDLERS.with(|handlers| handlers.borrow_mut().clear());
     DEVICE_LIST.with(|list| list.borrow_mut().clear());
+    OPENING_DEVICES.with(|devices| devices.borrow_mut().clear());
     DEVICE_REPORT_LISTENERS.with(|listeners| listeners.borrow_mut().clear());
     Ok(())
 }
@@ -84,6 +100,13 @@ pub(crate) async fn init() -> Result<(), HidError> {
         log::debug!("HID is not supported");
         return Err(HidError::NotSupported);
     }
+
+    ACCEPTED_FILTERS.with(|filters| {
+        let mut filters = filters.borrow_mut();
+        if !FILTERS_CONFIGURED.with(Cell::get) && filters.is_empty() {
+            filters.push((DEFAULT_VENDOR_ID, None));
+        }
+    });
 
     let api = get_api()?;
     let promise = api.get_devices();
@@ -136,12 +159,52 @@ pub(crate) async fn init() -> Result<(), HidError> {
         *handlers.borrow_mut() = Some((connect, disconnect));
     });
 
+    start_device_sync_timer();
+
     Ok(())
+}
+
+fn start_device_sync_timer() {
+    if DEVICE_SYNC_INTERVAL.with(Cell::get).is_some() {
+        return;
+    }
+    let callback = Closure::wrap(Box::new(|| {
+        if DEVICE_SYNC_RUNNING.replace(true) {
+            return;
+        }
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(error) = reconcile_devices().await {
+                log::debug!("periodic WebHID device sync failed: {error:?}");
+            }
+            DEVICE_SYNC_RUNNING.set(false);
+        });
+    }) as Box<dyn FnMut()>);
+    let interval = web_sys::window().and_then(|window| {
+        window
+            .set_interval_with_callback_and_timeout_and_arguments_0(
+                callback.as_ref().unchecked_ref(),
+                DEVICE_SYNC_INTERVAL_MS,
+            )
+            .ok()
+    });
+    if let Some(interval) = interval {
+        DEVICE_SYNC_INTERVAL.set(Some(interval));
+        DEVICE_SYNC_HANDLER.with(|handler| *handler.borrow_mut() = Some(callback));
+    }
+}
+
+fn stop_device_sync_timer() {
+    if let (Some(interval), Some(window)) = (DEVICE_SYNC_INTERVAL.take(), web_sys::window()) {
+        window.clear_interval_with_handle(interval);
+    }
+    DEVICE_SYNC_HANDLER.with(|handler| *handler.borrow_mut() = None);
+    DEVICE_SYNC_RUNNING.set(false);
 }
 
 pub(crate) async fn request_device(
     vendor_ids: Vec<(u16, Option<u16>)>,
 ) -> Result<Vec<u128>, HidError> {
+    set_device_filters(vendor_ids.clone());
     let filters: Vec<HidDeviceFilter> = vendor_ids
         .iter()
         .map(|(vendor_id, pid)| {
@@ -208,6 +271,48 @@ pub(crate) async fn request_device(
 pub(crate) fn get_device_list() -> Result<Vec<u128>, HidError> {
     let list = DEVICE_LIST.with(|list| list.borrow().keys().copied().collect());
     Ok(list)
+}
+
+/// Reconcile the WebHID cache with all currently-connected authorized devices.
+pub(crate) async fn reconcile_devices() -> Result<Vec<u128>, HidError> {
+    let promise = get_api()?.get_devices();
+    let result = JsFuture::from(promise).await;
+    let devices = match result {
+        Ok(d) => d,
+        Err(error) => {
+            return Err(HidError::Io(format!(
+                "FAILED to enumerate known HID devices: {error:?}"
+            )));
+        }
+    };
+    let devices = devices
+        .dyn_ref::<js_sys::Array>()
+        .ok_or_else(|| HidError::Other("failed to cast known HID devices to array".to_string()))?;
+
+    let current: Vec<HidDevice> = devices
+        .iter()
+        .filter_map(|value| value.dyn_into::<HidDevice>().ok())
+        .collect();
+
+    let stale: Vec<u128> = DEVICE_LIST.with(|list| {
+        list.borrow()
+            .iter()
+            .filter_map(|(uuid, package)| {
+                (!current.iter().any(|device| package.device.eq(device))).then_some(*uuid)
+            })
+            .collect()
+    });
+    for uuid in stale {
+        remove_device(uuid).await;
+    }
+
+    for device in current {
+        if find_device(&device).is_none() {
+            let _ = add_device(device).await?;
+        }
+    }
+
+    get_device_list()
 }
 
 pub(crate) fn register_connection_listener(
@@ -416,8 +521,14 @@ thread_local! {
     static DEVICE_LIST: RefCell<HashMap<u128, HidDevicePackage>> = RefCell::new(HashMap::new());
     static DEVICE_CONNECTION_LISTENERS: RefCell<HashMap<SubscriptionId, ConnectionCallback>> = RefCell::new(HashMap::new());
     static DEVICE_REPORT_LISTENERS: RefCell<HashMap<u128, HashMap<SubscriptionId, ReportCallback>>> = RefCell::new(HashMap::new());
+    static ACCEPTED_FILTERS: RefCell<Vec<(u16, Option<u16>)>> = const { RefCell::new(Vec::new()) };
+    static FILTERS_CONFIGURED: Cell<bool> = const { Cell::new(false) };
     static CONNECTION_HANDLERS: RefCell<Option<(Closure<dyn Fn(JsValue)>, Closure<dyn Fn(JsValue)>)>> = RefCell::new(None);
     static REPORT_HANDLERS: RefCell<HashMap<u128, Closure<dyn Fn(JsValue)>>> = RefCell::new(HashMap::new());
+    static OPENING_DEVICES: RefCell<Vec<HidDevice>> = const { RefCell::new(Vec::new()) };
+    static DEVICE_SYNC_INTERVAL: Cell<Option<i32>> = const { Cell::new(None) };
+    static DEVICE_SYNC_HANDLER: RefCell<Option<Closure<dyn FnMut()>>> = const { RefCell::new(None) };
+    static DEVICE_SYNC_RUNNING: Cell<bool> = const { Cell::new(false) };
 }
 
 ////////////////////////////////////////
@@ -583,7 +694,45 @@ async fn add_device(device: HidDevice) -> Result<Option<u128>, HidError> {
         None => (),
     };
 
-    future_delay(DEVICE_OPEN_DELAY_MS).await;
+    let already_opening = OPENING_DEVICES.with(|devices| {
+        let mut devices = devices.borrow_mut();
+        if devices.iter().any(|candidate| candidate.eq(&device)) {
+            true
+        } else {
+            devices.push(device.clone());
+            false
+        }
+    });
+    if already_opening {
+        log::debug!("device is already opening");
+        return Ok(None);
+    }
+
+    let result = add_device_inner(device.clone()).await;
+    OPENING_DEVICES.with(|devices| {
+        devices
+            .borrow_mut()
+            .retain(|candidate| !candidate.eq(&device));
+    });
+    result
+}
+
+async fn add_device_inner(device: HidDevice) -> Result<Option<u128>, HidError> {
+    match find_device(&device) {
+        Some(_) => return Ok(None),
+        None => (),
+    }
+
+    let accepted = ACCEPTED_FILTERS.with(|filters| {
+        filters.borrow().iter().any(|(vendor_id, product_id)| {
+            device.vendor_id() == *vendor_id
+                && product_id.is_none_or(|product_id| device.product_id() == product_id)
+        })
+    });
+    if !accepted {
+        return Ok(None);
+    }
+
     let collections = get_collections_by_device(device.clone());
 
     let has_report_id = collections
@@ -594,6 +743,8 @@ async fn add_device(device: HidDevice) -> Result<Option<u128>, HidError> {
     if !has_report_id {
         return Ok(None);
     }
+
+    future_delay(DEVICE_OPEN_DELAY_MS).await;
 
     match JsFuture::from(device.open()).await {
         Ok(_) => log::debug!("open device done"),
@@ -634,7 +785,9 @@ async fn add_device(device: HidDevice) -> Result<Option<u128>, HidError> {
 async fn remove_device(uuid: u128) {
     notify_connection_changed(uuid, false);
     let device = DEVICE_LIST.with(|list| {
-        list.borrow().get(&uuid).map(|package| package.device.clone())
+        list.borrow()
+            .get(&uuid)
+            .map(|package| package.device.clone())
     });
     if let Some(device) = device {
         device.set_oninputreport(None);

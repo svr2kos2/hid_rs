@@ -307,9 +307,10 @@ pub(crate) fn register_connection_listener(
                     for id in added.iter() {
                         log::debug!("Device connected: {}", uuid::Uuid::from_u128(*id));
                         for cb in &listeners {
-                            let result = std::panic::catch_unwind(
-                                std::panic::AssertUnwindSafe(|| cb(DeviceId(*id), true)),
-                            );
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    cb(DeviceId(*id), true)
+                                }));
                             if result.is_err() {
                                 log::error!("Android connection callback panicked");
                             }
@@ -318,9 +319,10 @@ pub(crate) fn register_connection_listener(
                     for id in removed.iter() {
                         log::debug!("Device disconnected: {}", uuid::Uuid::from_u128(*id));
                         for cb in &listeners {
-                            let result = std::panic::catch_unwind(
-                                std::panic::AssertUnwindSafe(|| cb(DeviceId(*id), false)),
-                            );
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    cb(DeviceId(*id), false)
+                                }));
                             if result.is_err() {
                                 log::error!("Android connection callback panicked");
                             }
@@ -842,9 +844,10 @@ pub(crate) fn register_report_listener(
                                                     if !bytes.is_empty() {
                                                         let shared: Arc<[u8]> =
                                                             Arc::from(bytes.into_boxed_slice());
-                                                        let new_depth = crate::increment_queue_depth(
-                                                            reader_depth.as_ref(),
-                                                        );
+                                                        let new_depth =
+                                                            crate::increment_queue_depth(
+                                                                reader_depth.as_ref(),
+                                                            );
                                                         match reader_tx.try_send(shared) {
                                                             Ok(()) => {
                                                                 if new_depth
