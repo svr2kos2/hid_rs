@@ -91,6 +91,7 @@ pub(crate) fn shutdown() -> Result<(), HidError> {
     REPORT_HANDLERS.with(|handlers| handlers.borrow_mut().clear());
     DEVICE_LIST.with(|list| list.borrow_mut().clear());
     OPENING_DEVICES.with(|devices| devices.borrow_mut().clear());
+    CANCELLED_OPENINGS.with(|devices| devices.borrow_mut().clear());
     DEVICE_REPORT_LISTENERS.with(|listeners| listeners.borrow_mut().clear());
     Ok(())
 }
@@ -293,18 +294,6 @@ pub(crate) async fn reconcile_devices() -> Result<Vec<u128>, HidError> {
         .iter()
         .filter_map(|value| value.dyn_into::<HidDevice>().ok())
         .collect();
-
-    let stale: Vec<u128> = DEVICE_LIST.with(|list| {
-        list.borrow()
-            .iter()
-            .filter_map(|(uuid, package)| {
-                (!current.iter().any(|device| package.device.eq(device))).then_some(*uuid)
-            })
-            .collect()
-    });
-    for uuid in stale {
-        remove_device(uuid).await;
-    }
 
     for device in current {
         if find_device(&device).is_none() {
@@ -526,6 +515,7 @@ thread_local! {
     static CONNECTION_HANDLERS: RefCell<Option<(Closure<dyn Fn(JsValue)>, Closure<dyn Fn(JsValue)>)>> = RefCell::new(None);
     static REPORT_HANDLERS: RefCell<HashMap<u128, Closure<dyn Fn(JsValue)>>> = RefCell::new(HashMap::new());
     static OPENING_DEVICES: RefCell<Vec<HidDevice>> = const { RefCell::new(Vec::new()) };
+    static CANCELLED_OPENINGS: RefCell<Vec<HidDevice>> = const { RefCell::new(Vec::new()) };
     static DEVICE_SYNC_INTERVAL: Cell<Option<i32>> = const { Cell::new(None) };
     static DEVICE_SYNC_HANDLER: RefCell<Option<Closure<dyn FnMut()>>> = const { RefCell::new(None) };
     static DEVICE_SYNC_RUNNING: Cell<bool> = const { Cell::new(false) };
@@ -598,9 +588,9 @@ pub async fn on_connection_changed(event_js: JsValue, connected: bool) -> Promis
             log::warn!("add_device failed: {e}");
         }
     } else {
-        match find_device(&device) {
+        match find_device_for_event(&device) {
             Some(uuid) => remove_device(uuid).await,
-            None => (),
+            None => cancel_opening(&device),
         };
         match JsFuture::from(device.close()).await {
             Ok(_) => log::debug!("close device done"),
@@ -634,10 +624,18 @@ fn handle_input_report_event(event_js: JsValue) {
         }
     };
     let device = event.device();
-    let uuid = match find_device(&device) {
+    let uuid = match find_device_for_event(&device) {
         Some(u) => u,
-        None => return,
+        None => {
+            log::warn!("dropping input report for an unrecognized WebHID device");
+            return;
+        }
     };
+
+    dispatch_input_report(uuid, event);
+}
+
+fn dispatch_input_report(uuid: u128, event: HidInputReportEvent) {
 
     let report_id = event.report_id();
     let data_view = event.data();
@@ -685,7 +683,40 @@ fn find_device(device: &HidDevice) -> Option<u128> {
     })
 }
 
+fn find_device_for_event(device: &HidDevice) -> Option<u128> {
+    if let Some(uuid) = find_device(device) {
+        return Some(uuid);
+    }
+
+    let matches: Vec<u128> = DEVICE_LIST.with(|list| {
+        list.borrow()
+            .iter()
+            .filter_map(|(uuid, package)| {
+                let candidate = &package.device;
+                (candidate.vendor_id() == device.vendor_id()
+                    && candidate.product_id() == device.product_id()
+                    && candidate.product_name() == device.product_name())
+                .then_some(*uuid)
+            })
+            .collect()
+    });
+    if matches.len() == 1 {
+        Some(matches[0])
+    } else if matches.is_empty() {
+        DEVICE_LIST.with(|list| {
+            let list = list.borrow();
+            (list.len() == 1).then(|| list.keys().next().copied()).flatten()
+        })
+    } else {
+        None
+    }
+}
+
 async fn add_device(device: HidDevice) -> Result<Option<u128>, HidError> {
+    CANCELLED_OPENINGS.with(|devices| {
+        devices.borrow_mut().retain(|candidate| !candidate.eq(&device));
+    });
+
     match find_device(&device) {
         Some(_) => {
             log::debug!("device already exist");
@@ -746,25 +777,66 @@ async fn add_device_inner(device: HidDevice) -> Result<Option<u128>, HidError> {
 
     future_delay(DEVICE_OPEN_DELAY_MS).await;
 
-    match JsFuture::from(device.open()).await {
-        Ok(_) => log::debug!("open device done"),
-        Err(err) => log::debug!("open device failed {:?}", err),
+    let mut open_error = None;
+    let mut opened = false;
+    for attempt in 0..3 {
+        match JsFuture::from(device.open()).await {
+            Ok(_) => {
+                opened = true;
+                log::info!("open device done after attempt {}", attempt + 1);
+                break;
+            }
+            Err(err) => {
+                log::warn!("open device attempt {} failed: {:?}", attempt + 1, err);
+                open_error = Some(err);
+                if attempt < 2 {
+                    future_delay(200).await;
+                }
+            }
+        }
     }
+    if !opened {
+        return Err(HidError::Io(format!(
+            "failed to open HID device after retries: {:?}",
+            open_error
+        )));
+    }
+
+    let cancelled = CANCELLED_OPENINGS.with(|devices| {
+        devices.borrow().iter().any(|candidate| candidate.eq(&device))
+    });
+    if cancelled {
+        let _ = JsFuture::from(device.close()).await;
+        return Err(HidError::Io("device disconnected while opening".to_string()));
+    }
+
+    let opened_collections = get_collections_by_device(device.clone());
+    let mut collections = collections;
+    collections.input_reports.extend(opened_collections.input_reports);
+    collections.output_reports.extend(opened_collections.output_reports);
+    collections.feature_reports.extend(opened_collections.feature_reports);
 
     // Dispatch inputreport synchronously from the browser-fired event
     // (no spawn_local microtask hop) to minimize per-report latency.
-    let on_report = Closure::wrap(Box::new(|event: JsValue| {
-        handle_input_report_event(event);
+    let uuid = crate::get_uuid();
+    let on_report = Closure::wrap(Box::new(move |event: JsValue| {
+        let Ok(event) = event.dyn_into::<HidInputReportEvent>() else {
+            log::debug!("FAILED to cast JsValue to HidInputReportEvent");
+            return;
+        };
+        dispatch_input_report(uuid, event);
     }) as Box<dyn Fn(JsValue)>);
 
     device.set_oninputreport(Some(on_report.as_ref().unchecked_ref()));
 
-    let uuid = crate::get_uuid();
-    let report_info = collections
+    let mut report_info = collections
         .input_reports
         .iter()
         .map(|r| (r.report_id, r.clone()))
-        .collect();
+        .collect::<HashMap<_, _>>();
+    for report in &collections.output_reports {
+        report_info.insert(report.report_id, report.clone());
+    }
     DEVICE_LIST.with(|list| {
         list.borrow_mut().insert(
             uuid,
@@ -800,6 +872,20 @@ async fn remove_device(uuid: u128) {
     });
     DEVICE_REPORT_LISTENERS.with(|listeners| {
         listeners.borrow_mut().remove(&uuid);
+    });
+}
+
+fn cancel_opening(device: &HidDevice) {
+    OPENING_DEVICES.with(|devices| {
+        devices
+            .borrow_mut()
+            .retain(|candidate| !candidate.eq(device));
+    });
+    CANCELLED_OPENINGS.with(|devices| {
+        let mut devices = devices.borrow_mut();
+        if !devices.iter().any(|candidate| candidate.eq(device)) {
+            devices.push(device.clone());
+        }
     });
 }
 
