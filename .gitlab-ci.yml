@@ -7,7 +7,7 @@ workflow:
     - if: '$CI_COMMIT_BRANCH'
 
 default:
-  image: rust:1.94.0-bookworm
+  image: public.ecr.aws/docker/library/rust:1.94.0-bookworm
   interruptible: true
 
 stages:
