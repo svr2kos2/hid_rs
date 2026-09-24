@@ -1,0 +1,39 @@
+workflow:
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+default:
+  image: rust:1.94.0-bookworm
+  interruptible: true
+
+stages:
+  - build
+
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  CARGO_TERM_COLOR: always
+
+build:
+  stage: build
+  cache:
+    key: rust-1.94.0
+    paths:
+      - .cargo/registry/
+      - .cargo/git/
+      - target/
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends libudev-dev pkg-config
+    - rustup target add wasm32-unknown-unknown
+  script:
+    - cargo build --release --lib
+    - cargo build --release --lib --target wasm32-unknown-unknown
+  artifacts:
+    name: "hid-rs-$CI_COMMIT_SHORT_SHA"
+    expire_in: 14 days
+    paths:
+      - target/release/libhid_rs.so
+      - target/wasm32-unknown-unknown/release/hid_rs.wasm

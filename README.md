@@ -9,6 +9,14 @@ A cross-platform Rust HID (Human Interface Device) library with support for Wind
 - **Android Support**: Includes a complete Android library module with JNI bindings and Kotlin helpers.
 - **Web Support**: Uses `web-sys` for WebHID API support.
 
+## GitLab CI
+
+The GitLab pipeline builds the Linux native library and the WebAssembly target
+with Rust 1.94.0 on a Linux Docker Runner. Build artifacts are retained for
+14 days. Automated and hardware-dependent tests are not part of this pipeline.
+Consumers such as `sayo_device_lib` pin this repository through a Git submodule;
+updating the submodule commit explicitly selects a new version.
+
 ## Installation
 
 Add this to your `Cargo.toml`:
