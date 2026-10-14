@@ -36,6 +36,11 @@ object UsbHidBridge {
     private val inputAbort = ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean>()
     // Track in-flight requests for cooperative cancellation on stop
     private val inputRequests = ConcurrentHashMap<String, MutableList<android.hardware.usb.UsbRequest>>()
+    // Optional per-device push target (WebView host). When set, input reports
+    // bypass the queue that the JNI path drains via takeInputReport.
+    private val inputSinks = ConcurrentHashMap<String, (ByteArray) -> Unit>()
+    // deviceName of attachments already prompted by requestPermissionForMatching.
+    private val promptedDevices = ConcurrentHashMap.newKeySet<String>()
 
     private fun logEnter(fn: String) {
         FlutterLogger.d(TAG, "ENTER $fn")
@@ -66,10 +71,22 @@ object UsbHidBridge {
         }
     }
 
+    private fun deliverInput(uuid: String, queue: java.util.concurrent.LinkedBlockingQueue<ByteArray>, data: ByteArray): Boolean {
+        val sink = inputSinks[uuid] ?: return queue.offer(data)
+        try {
+            sink(data)
+        } catch (t: Throwable) {
+            FlutterLogger.w(TAG, "input sink for $uuid threw: $t")
+        }
+        return true
+    }
+
     private fun deviceKey(dev: UsbDevice): String {
         logEnter("deviceKey")
         return try {
-            listOf(dev.vendorId, dev.productId, dev.deviceName ?: "", safeSerial(dev)).joinToString(":")
+            // No serial number: it is only readable once permission is granted,
+            // so including it would re-key the device at the moment of the grant.
+            listOf(dev.vendorId, dev.productId, dev.deviceName ?: "").joinToString(":")
         } finally {
             logExit("deviceKey")
         }
@@ -156,6 +173,7 @@ object UsbHidBridge {
         logEnter("tearDownDevice")
         try {
             stopInputListener(uuid)
+            inputSinks.remove(uuid)
             inputThreads.remove(uuid)?.interrupt()
             inputAbort.remove(uuid)
             inputQueues.remove(uuid)?.clear()
@@ -248,12 +266,7 @@ object UsbHidBridge {
 
         // Request permission and poll up to ~15 seconds for result
         // Android 14+ forbids creating mutable implicit PendingIntents; use explicit and immutable.
-        val appCtx = context.applicationContext
-        val intent = Intent(appCtx, UsbPermissionReceiver::class.java).apply {
-            action = ACTION_USB_PERMISSION
-        }
-        val piFlags = if (android.os.Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0
-        val pi = PendingIntent.getBroadcast(appCtx, 0, intent, piFlags)
+        val pi = permissionIntent(context)
         return try {
             FlutterLogger.i(TAG, "requestDevices -> requesting permission for ${candidate.deviceName} vid=${candidate.vendorId} pid=${candidate.productId}")
             usb.requestPermission(candidate, pi)
@@ -353,6 +366,23 @@ object UsbHidBridge {
         }
     }
 
+    @JvmStatic
+    fun getSerialNumber(uuid: String): String? {
+        logEnter("getSerialNumber")
+        return try {
+            val dev = deviceUuidMap[uuid] ?: return null
+            safeSerial(dev).ifEmpty { null }
+        } finally {
+            logExit("getSerialNumber")
+        }
+    }
+
+    /** Route input reports for [uuid] to [sink] instead of the JNI queue; `null` restores queueing. */
+    @JvmStatic
+    fun setInputSink(uuid: String, sink: ((ByteArray) -> Unit)?) {
+        if (sink == null) inputSinks.remove(uuid) else inputSinks[uuid] = sink
+    }
+
     data class DeviceConn(
         val device: UsbDevice,
         val iface: UsbInterface,
@@ -380,13 +410,7 @@ object UsbHidBridge {
             val (usb, devices) = snapshotUsbDevices(context)
             val dev = resolveDevice(uuid, usb, devices) ?: return false
             if (usb.hasPermission(dev)) return true
-            // Use explicit, immutable PendingIntent to satisfy Android 14+ restrictions
-            val appCtx = context.applicationContext
-            val intent = Intent(appCtx, UsbPermissionReceiver::class.java).apply {
-                action = ACTION_USB_PERMISSION
-            }
-            val flags = if (android.os.Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0
-            val pi = PendingIntent.getBroadcast(appCtx, 0, intent, flags)
+            val pi = permissionIntent(context)
             try {
                 FlutterLogger.i(TAG, "requestPermission(uuid=$uuid) -> requesting permission")
                 usb.requestPermission(dev, pi)
@@ -398,6 +422,39 @@ object UsbHidBridge {
         } finally {
             logExit("requestPermission")
         }
+    }
+
+    /**
+     * Ask (without blocking) for permission on attached devices whose VID/PID is
+     * in [vidPids] and that lack it, e.g. after a replug revoked the grant.
+     * Each attachment is prompted at most once, so a dismissed dialog does not
+     * reappear until the device is plugged in again.
+     */
+    @JvmStatic
+    fun requestPermissionForMatching(context: Context, vidPids: Set<Pair<Int, Int>>) {
+        val (usb, devices) = snapshotUsbDevices(context)
+        promptedDevices.retainAll(devices.map { it.deviceName }.toSet())
+        for (dev in devices) {
+            if (usb.hasPermission(dev)) continue
+            if ((dev.vendorId to dev.productId) !in vidPids) continue
+            if (!promptedDevices.add(dev.deviceName)) continue
+            try {
+                FlutterLogger.i(TAG, "requestPermissionForMatching -> prompting for ${dev.deviceName} vid=${dev.vendorId} pid=${dev.productId}")
+                usb.requestPermission(dev, permissionIntent(context))
+            } catch (t: Throwable) {
+                FlutterLogger.w(TAG, "requestPermissionForMatching(${dev.deviceName}) failed: $t")
+            }
+        }
+    }
+
+    // Android 14+ forbids mutable implicit PendingIntents; use explicit and immutable.
+    private fun permissionIntent(context: Context): PendingIntent {
+        val appCtx = context.applicationContext
+        val intent = Intent(appCtx, UsbPermissionReceiver::class.java).apply {
+            action = ACTION_USB_PERMISSION
+        }
+        val flags = if (android.os.Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0
+        return PendingIntent.getBroadcast(appCtx, 0, intent, flags)
     }
 
     @JvmStatic
@@ -519,7 +576,7 @@ object UsbHidBridge {
                             val arr = ByteArray(len)
                             buffer.flip()
                             buffer.get(arr)
-                            val offered = queue.offer(arr)
+                            val offered = deliverInput(uuid, queue, arr)
                             FlutterLogger.d(TAG, "startInputListener($uuid) -> queued ${arr.size} bytes via UsbRequest offered=$offered data=${toHex(arr, 128)}")
                             if (!offered) {
                                 FlutterLogger.w(TAG, "startInputListener($uuid) -> queue.offer returned false (capacity reached?)")
@@ -557,7 +614,7 @@ object UsbHidBridge {
                         }
                         if (n > 0) {
                             val copy = arr.copyOf(n)
-                            val offered = queue.offer(copy)
+                            val offered = deliverInput(uuid, queue, copy)
                             FlutterLogger.d(TAG, "startInputListener($uuid) -> queued $n bytes via bulkTransfer offered=$offered data=${toHex(copy, 128)}")
                             if (!offered) {
                                 FlutterLogger.w(TAG, "startInputListener($uuid) -> bulk queue.offer returned false (capacity reached?)")

@@ -1,4 +1,3 @@
-#[cfg(not(target_arch = "wasm32"))]
 use hidreport::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -110,14 +109,14 @@ impl HidReportInfo {
         })
     }
 
-    #[cfg(target_os = "android")]
+    /// Android and the WebView bridge parse the raw descriptor themselves.
+    /// `size_in_bytes()` already counts the Report ID byte when one is
+    /// declared; reports without a Report ID are addressed as ID 0 with no
+    /// prefix byte on the wire.
+    #[cfg(any(target_os = "android", target_arch = "wasm32"))]
     fn from_hid_report(report: &impl Report) -> Option<Self> {
-        // If the descriptor doesn't specify a Report ID, HID semantics treat it as 0
-        // and no Report ID prefix byte is present in the actual report data.
-        let has_report_id = report.report_id().is_some();
         let report_id: u8 = report.report_id().map(|id| id.into()).unwrap_or(0);
-        // size_in_bytes() is the payload size without the Report ID byte; add 1 only when present
-        let size: usize = report.size_in_bytes() + if has_report_id { 1 } else { 0 };
+        let size: usize = report.size_in_bytes();
         let mut usages: Vec<u32> = Vec::new();
         for field in report.fields() {
             for collection in field.collections() {
@@ -127,14 +126,13 @@ impl HidReportInfo {
             }
         }
         Some(HidReportInfo {
-            report_id: report_id,
-            size: size,
-            usages: usages,
+            report_id,
+            size,
+            usages,
         })
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn from_array(array: &[impl Report]) -> Vec<Self> {
+    fn from_report_list(array: &[impl Report]) -> Vec<Self> {
         let mut vec = Vec::new();
         for item in array {
             match Self::from_hid_report(item) {
@@ -193,17 +191,24 @@ impl HidReportDescriptor {
         })
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn from_hid_report(report: ReportDescriptor) -> Self {
         let input_reports = report.input_reports();
         let output_reports = report.output_reports();
         let feature_reports = report.feature_reports();
 
         HidReportDescriptor {
-            input_reports: HidReportInfo::from_array(input_reports),
-            output_reports: HidReportInfo::from_array(output_reports),
-            feature_reports: HidReportInfo::from_array(feature_reports),
+            input_reports: HidReportInfo::from_report_list(input_reports),
+            output_reports: HidReportInfo::from_report_list(output_reports),
+            feature_reports: HidReportInfo::from_report_list(feature_reports),
         }
+    }
+
+    /// Parse a raw HID report descriptor.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn from_raw(bytes: &[u8]) -> Option<Self> {
+        ReportDescriptor::try_from(bytes)
+            .ok()
+            .map(Self::from_hid_report)
     }
 }
 

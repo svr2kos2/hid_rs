@@ -40,6 +40,8 @@ android {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
+    // WebViewHidHost: WebMessageListener with ArrayBuffer messages.
+    implementation("androidx.webkit:webkit:1.12.1")
     implementation("org.jetbrains.kotlin:kotlin-stdlib:1.9.22")
 }
 

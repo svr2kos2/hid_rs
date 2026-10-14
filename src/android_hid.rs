@@ -449,43 +449,49 @@ pub(crate) fn pid(uuid: u128) -> Result<u16, HidError> {
 
 pub(crate) fn get_product_name(uuid: u128) -> Result<Option<String>, HidError> {
     let _fn_logger = FnLogger::new("android_hid::get_product_name");
-    {
-        let (vm, ctx) = get_vm_and_context().map_err(|e| HidError::Other(e))?;
-        let mut env = vm
-            .attach_current_thread()
-            .map_err(|e| HidError::Io(format!("attach_current_thread: {e:?}")))?;
-        let juuid = env
-            .new_string(uuid::Uuid::from_u128(uuid).to_string())
-            .map_err(|e| HidError::Io(format!("new_string: {e:?}")))?;
-        let juuid_obj: JObject = juuid.into();
-        let args = vec![JValue::Object(&juuid_obj)];
-        let gclass = load_bridge_class(&mut env, &ctx).map_err(|e| HidError::Other(e))?;
-        let local_class = env
-            .new_local_ref(gclass.as_obj())
-            .map_err(|e| HidError::Io(format!("new_local_ref(class): {e:?}")))?;
-        let jclass: JClass = JClass::from(local_class);
-        let val = env
-            .call_static_method(
-                jclass,
-                "getProductName",
-                "(Ljava/lang/String;)Ljava/lang/String;",
-                &args,
-            )
-            .map_err(|e| HidError::Io(format!("call getProductName: {e:?}")))?;
-        let s_obj = val
-            .l()
-            .map_err(|e| HidError::Io(format!("to obj: {e:?}")))?;
-        if s_obj.is_null() {
-            return Ok(None);
-        }
-        let jstr: JString = s_obj.into();
-        let rust_str = env
-            .get_string(&jstr)
-            .map_err(|e| HidError::Io(format!("get_string: {e:?}")))?;
-        return Ok(Some(rust_str.to_str().unwrap_or("").to_string()));
+    call_bridge_string_getter(uuid, "getProductName")
+}
+
+pub(crate) fn get_serial_number(uuid: u128) -> Result<Option<String>, HidError> {
+    let _fn_logger = FnLogger::new("android_hid::get_serial_number");
+    call_bridge_string_getter(uuid, "getSerialNumber")
+}
+
+/// Calls a static `UsbHidBridge.<method>(uuid: String): String?`.
+fn call_bridge_string_getter(uuid: u128, method: &str) -> Result<Option<String>, HidError> {
+    let (vm, ctx) = get_vm_and_context().map_err(|e| HidError::Other(e))?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| HidError::Io(format!("attach_current_thread: {e:?}")))?;
+    let juuid = env
+        .new_string(uuid::Uuid::from_u128(uuid).to_string())
+        .map_err(|e| HidError::Io(format!("new_string: {e:?}")))?;
+    let juuid_obj: JObject = juuid.into();
+    let args = vec![JValue::Object(&juuid_obj)];
+    let gclass = load_bridge_class(&mut env, &ctx).map_err(|e| HidError::Other(e))?;
+    let local_class = env
+        .new_local_ref(gclass.as_obj())
+        .map_err(|e| HidError::Io(format!("new_local_ref(class): {e:?}")))?;
+    let jclass: JClass = JClass::from(local_class);
+    let val = env
+        .call_static_method(
+            jclass,
+            method,
+            "(Ljava/lang/String;)Ljava/lang/String;",
+            &args,
+        )
+        .map_err(|e| HidError::Io(format!("call {method}: {e:?}")))?;
+    let s_obj = val
+        .l()
+        .map_err(|e| HidError::Io(format!("to obj: {e:?}")))?;
+    if s_obj.is_null() {
+        return Ok(None);
     }
-    #[allow(unreachable_code)]
-    Ok(None)
+    let jstr: JString = s_obj.into();
+    let rust_str = env
+        .get_string(&jstr)
+        .map_err(|e| HidError::Io(format!("get_string: {e:?}")))?;
+    Ok(Some(rust_str.to_str().unwrap_or("").to_string()))
 }
 
 pub(crate) fn get_collections(uuid: u128) -> Result<HidReportDescriptor, HidError> {

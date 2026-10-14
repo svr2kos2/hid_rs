@@ -1,5 +1,9 @@
 #[cfg(target_arch = "wasm32")]
-#[path = "web_hid.rs"]
+mod bridge_hid;
+#[cfg(target_arch = "wasm32")]
+mod web_hid;
+#[cfg(target_arch = "wasm32")]
+#[path = "wasm_hid.rs"]
 mod platform_hid;
 
 #[cfg(all(not(target_arch = "wasm32"), target_os = "android"))]
@@ -61,14 +65,16 @@ pub fn clear_device_filter() {
     }
 }
 
-/// Mint a process-local identifier for a connected physical device.
+/// Mint a process-local identifier for a connected physical device. Android
+/// uses the identifiers minted by `UsbHidBridge` instead.
+#[cfg(not(target_os = "android"))]
 pub(crate) fn get_uuid() -> u128 {
     uuid::Uuid::new_v4().as_u128()
 }
 
 /// Internal: evaluate the installed filter on a descriptor. Returns `true`
 /// when no filter is set so backends accept everything by default.
-#[allow(dead_code)] // currently only consulted by the desktop backend
+#[allow(dead_code)] // consulted by the desktop and WebView-bridge backends
 pub(crate) fn evaluate_device_filter(desc: &HidReportDescriptor) -> bool {
     match DEVICE_FILTER.read() {
         Ok(slot) => slot.as_ref().is_none_or(|f| f(desc)),
@@ -503,7 +509,7 @@ impl HidDevice {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::{decrement_queue_depth, increment_queue_depth};
     use std::sync::atomic::{AtomicUsize, Ordering};
